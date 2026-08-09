@@ -1,0 +1,111 @@
+# Typed local protocol, schema version 1
+
+The browser and CLI expose the same records. JSON field names and event meanings described here are stable for schema version 1; additive fields may appear. Consumers must reject unsupported `schemaVersion` values rather than guessing.
+
+## Session metadata
+
+`open --json` returns the capability-bearing local URL only to the invoking local process:
+
+```json
+{
+  "schemaVersion": 1,
+  "sessionId": "cae71af8a34aeb39220354a0",
+  "baseSha": "40-hex-commit-id",
+  "headSha": "40-hex-commit-id",
+  "browserUrl": "http://127.0.0.1:49152/#/review/<session>/<capability>",
+  "resumed": false,
+  "status": "open"
+}
+```
+
+`status --json` omits capabilities and paths. It includes revision SHAs, change summary, `stale`, `approvalStale`, event counts, the latest sequence, and timestamps.
+
+The browser manifest includes repository display name, original ref labels, resolved SHAs, lifecycle/stale state, summary, and files. A file contains `path`, optional `oldPath`, status, counts, binary/truncated flags, and hunks. Each diff line contains its kind, nullable old/new number, plain text, and contextual hash.
+
+## Comment input
+
+A feedback request batches one or more drafts:
+
+```json
+{
+  "comments": [
+    {
+      "scope": "line",
+      "path": "src/cart.ts",
+      "body": "Should this round only at the formatting boundary?",
+      "anchor": {
+        "revision": { "baseSha": "…", "headSha": "…" },
+        "path": "src/cart.ts",
+        "side": "new",
+        "startLine": 18,
+        "endLine": 20,
+        "contextHash": "24-hex-context-hash",
+        "endContextHash": "24-hex-context-hash"
+      }
+    },
+    {
+      "scope": "general",
+      "body": "The new boundary is much clearer."
+    }
+  ]
+}
+```
+
+`scope` is `line`, `file`, or `general`. File comments require `path` and no anchor. General comments have neither. Line ranges must stay on one old/new side within one file.
+
+## Durable events
+
+All events share:
+
+```ts
+interface EventBase {
+  schemaVersion: 1;
+  sessionId: string;
+  sequence: number; // monotonic within this session
+  id: string; // UUID submission identity
+  createdAt: string; // ISO 8601
+  baseSha: string;
+  headSha: string;
+}
+```
+
+Feedback has `type: "feedback"` and a `comments` array. The server adds a UUID and timestamp to each comment. Approval has `type: "approval"` and `approvedHeadSha`, which always equals the event's exact `headSha`. End has `type: "end"`.
+
+`poll <session> --after N --json` returns every event with `sequence > N`:
+
+```json
+{
+  "schemaVersion": 1,
+  "sessionId": "cae71af8a34aeb39220354a0",
+  "after": 4,
+  "nextCursor": 6,
+  "timedOut": false,
+  "events": ["event 5", "event 6"]
+}
+```
+
+A timeout is successful and returns an empty event list with `timedOut: true` and an unchanged cursor. Delivery is non-destructive. For restart safety, a consumer processes events in ascending sequence, durably stores `nextCursor`, then issues the next poll. Replaying an old cursor intentionally replays events; UUID and sequence let consumers enforce their own exactly-once effects without hidden server acknowledgment state.
+
+`export --json` returns `{ schemaVersion, session, events }`. It includes diff text and all durable review records, but no capability, server-management data, PID/port, or absolute path. `--diagnostic` adds `diagnostics.repositoryPath` explicitly for a trusted local caller.
+
+## HTTP mapping
+
+The UI uses these loopback-only routes with `Authorization: Bearer <session capability>`:
+
+| Method | Route                                            | Result                     |
+| ------ | ------------------------------------------------ | -------------------------- |
+| `GET`  | `/api/v1/sessions/:id`                           | Review manifest            |
+| `GET`  | `/api/v1/sessions/:id/events?after=N&timeout=MS` | Long-poll result           |
+| `POST` | `/api/v1/sessions/:id/feedback`                  | Created feedback event     |
+| `POST` | `/api/v1/sessions/:id/approval`                  | Created exact-SHA approval |
+| `POST` | `/api/v1/sessions/:id/end`                       | Idempotent end event       |
+
+The control ping is private implementation plumbing with a different local capability; it is not an integration API.
+
+Errors have this shape:
+
+```json
+{ "schemaVersion": 1, "error": { "code": "STALE_ANCHOR", "message": "…" } }
+```
+
+Source TypeScript definitions are authoritative in [`src/protocol.ts`](../src/protocol.ts).
