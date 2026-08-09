@@ -15,6 +15,6 @@ Before opening a pull request:
 
 Do not add telemetry, external runtime assets, hosted dependencies, repository writes, shell-based Git invocation, or arbitrary filesystem APIs. New runtime dependencies should be narrowly scoped, maintained, and justified against a standard-library or existing-dependency solution.
 
-Formatting is enforced with Prettier, linting with ESLint, types with TypeScript, unit/integration tests with Vitest, and real-browser tests with Playwright. The tarball smoke test ensures changes work after packaging, not just in the checkout.
+Formatting is enforced with Prettier, linting with ESLint, types with TypeScript, unit/integration tests with Vitest, and real-browser tests with Playwright. `npm run test:skill` validates the public skill against current CLI help and documentation. The tarball smoke test proves skill discovery and the complete CLI lifecycle after packaging, not just in the checkout.
 
 By participating, you agree that your contributions are licensed under the MIT License.
