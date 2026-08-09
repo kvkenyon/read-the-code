@@ -25,7 +25,7 @@ npm run build
 npx read-the-code-axi open --repo . --base main --head HEAD
 ```
 
-`open` resolves both refs before creating the review. Repeating the command for the same repository and SHAs resumes the same session idempotently. Add `--no-browser --json` for agent use.
+`open` resolves both refs before creating the review. Repeating the command for the same repository and SHAs resumes the same session idempotently. Its normal response is compact TOON and confirms the local browser launch without echoing the bearer URL. Use `--no-browser --json` only when an agent needs the versioned capability-bearing machine record.
 
 ## Agent integration
 
@@ -69,12 +69,18 @@ Example prompt:
 ```text
 read-the-code-axi open --repo <path> --base <ref> --head <ref> [--no-browser] [--json]
 read-the-code-axi status <session> [--json]
-read-the-code-axi poll <session> [--after <cursor>] [--timeout <duration>] [--json]
-read-the-code-axi export <session> [--diagnostic] [--json]
+read-the-code-axi poll <session> [--after <cursor>] [--timeout <duration>] [--full] [--json]
+read-the-code-axi export <session> [--diagnostic] [--full] [--json]
 read-the-code-axi end <session> [--json]
 ```
 
-Durations accept `ms`, `s`, or `m`, such as `500ms`, `30s`, and `2m`. JSON responses use `schemaVersion: 1`. Errors sent with `--json` are also structured and written to stderr.
+### AXI output contract
+
+Running `read-the-code-axi` with no arguments is a content-first home view: executable location, a short description, up to five recent sessions, aggregates, an explicit `sessions: []` empty state, and next commands. Ordinary commands return official TOON by default, with minimal summaries, bounded comment/path previews, aggregate activity, and contextual `help[]`. `poll` calls out `waiting`, `feedback`, `approval`, `approval-stale`, and `ended` instead of requiring inference from an empty response.
+
+Use `--full` for complete TOON event/export content. Use explicit `--json` for typed processing: JSON remains the stable `schemaVersion: 1` contract for Sophon and other durable consumers, including exact session identity, cursor continuity, full events, and capability-bearing `open` results. Default TOON is intentionally a concise agent-facing view, not a replacement for that protocol. Default failures are structured TOON on stdout; `--json` failures retain the versioned JSON error record on stderr. Unknown commands and flags exit 2.
+
+Durations accept `ms`, `s`, or `m`, such as `500ms`, `30s`, and `2m`. The packed-product smoke test decodes every default response with the official TOON decoder, exercises the full lifecycle in both surfaces, and requires the bounded default export to be at least 10% smaller than its complete JSON counterpart. Its representative hostile-comment fixture currently measures 1,991 B TOON versus 7,954 B JSON (75% smaller), demonstrating the practical token-saving direction without making a tokenizer-specific claim.
 
 ### Agent loop
 
@@ -96,7 +102,7 @@ done
 read-the-code-axi export "$session" --json > review-record.json
 ```
 
-Human text output is the default. Machine consumers should use JSON and treat these exit codes as stable categories:
+Use default TOON for a human-readable shell check, for example `read-the-code-axi status <session>` or `read-the-code-axi poll <session> --after <cursor>`. Machine consumers, including Sophon, should use JSON and treat these exit codes as stable categories:
 
 | Exit | Meaning                                        |
 | ---: | ---------------------------------------------- |

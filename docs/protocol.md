@@ -2,6 +2,8 @@
 
 The browser and CLI expose the same records. JSON field names and event meanings described here are stable for schema version 1; additive fields may appear. Consumers must reject unsupported `schemaVersion` values rather than guessing.
 
+The normal CLI surface is compact TOON intended for agent-readable summaries. It deliberately bounds long comments, paths, file lists, and archival output; use `--full` to expand that TOON view. This document is the separate stable automation contract: Sophon and other consumers that need exact identities, cursors, complete event bodies, or the local `open` capability must request `--json`. JSON semantics, event ordering, error categories, and `schemaVersion: 1` remain unchanged.
+
 ## Session metadata
 
 `open --json` returns the capability-bearing local URL only to the invoking local process:
