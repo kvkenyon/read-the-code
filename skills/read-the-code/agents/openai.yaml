@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Read the Code'
+  short_description: 'Review exact local Git revisions safely'
+  default_prompt: 'Use $read-the-code to open this exact local change for human review and process the durable feedback.'

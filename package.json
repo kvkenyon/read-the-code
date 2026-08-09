@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    "skills",
     "README.md",
     "LICENSE"
   ],
@@ -27,10 +28,12 @@
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "test:e2e": "npm run build && playwright test",
+    "test:skill": "npm run build && node scripts/validate-skill.mjs",
+    "test:skill:built": "node scripts/validate-skill.mjs",
     "test:pack": "node scripts/pack-smoke.mjs",
     "fixture": "node scripts/create-fixture.mjs .test-state/example-repository",
     "screenshot": "node scripts/capture-screenshot.mjs",
-    "check": "npm run format && npm run lint && npm run typecheck && npm test && npm run build && npm run test:pack",
+    "check": "npm run format && npm run lint && npm run typecheck && npm test && npm run build && npm run test:skill:built && npm run test:pack",
     "release:check": "npm run check && npm run test:e2e && npm pack --dry-run",
     "prepack": "npm run build"
   },

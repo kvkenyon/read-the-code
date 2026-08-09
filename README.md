@@ -27,6 +27,43 @@ npx read-the-code-axi open --repo . --base main --head HEAD
 
 `open` resolves both refs before creating the review. Repeating the command for the same repository and SHAs resumes the same session idempotently. Add `--no-browser --json` for agent use.
 
+## Agent integration
+
+The canonical [Read the Code skill](skills/read-the-code/SKILL.md) follows the open [Agent Skills specification](https://agentskills.io/specification). It teaches coding agents to manage the exact-revision CLI lifecycle, durable cursors, untrusted feedback, capability secrecy, recovery, and exact-head approval without depending on a pull request or a vendor-specific control plane.
+
+Install the skill from a public source checkout by copying or linking the complete directory into a supported skill location:
+
+```bash
+git clone --depth 1 https://github.com/kvkenyon/read-the-code.git
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/read-the-code/skills/read-the-code" "$HOME/.agents/skills/read-the-code"
+```
+
+The npm tarball also carries the directory. After installing a local or published package, copy it directly from the package:
+
+```bash
+npm install /path/to/read-the-code-axi-0.1.0.tgz
+mkdir -p .agents/skills
+cp -R node_modules/read-the-code-axi/skills/read-the-code .agents/skills/read-the-code
+```
+
+Use the destination recognized by the agent client and desired scope:
+
+| Client                                           | Project skill                  | Personal skill                     |
+| ------------------------------------------------ | ------------------------------ | ---------------------------------- |
+| Portable convention, Codex, VS Code, Copilot, pi | `.agents/skills/read-the-code` | `~/.agents/skills/read-the-code`   |
+| Claude Code                                      | `.claude/skills/read-the-code` | `~/.claude/skills/read-the-code`   |
+| GitHub Copilot native alternative                | `.github/skills/read-the-code` | `~/.copilot/skills/read-the-code`  |
+| pi native alternative                            | `.pi/skills/read-the-code`     | `~/.pi/agent/skills/read-the-code` |
+
+These locations are documented by [Agent Skills](https://agentskills.io/client-implementation/adding-skills-support), [Codex](https://developers.openai.com/codex/build-skills), [Claude Code](https://code.claude.com/docs/en/skills), [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/add-skills), and [pi](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md). Client discovery rules evolve; prefer the client-native path above if a particular version does not scan `.agents/skills`.
+
+The skill expects `read-the-code-axi` on `PATH`. The npm package is not published by this repository change; from a trusted checkout, run `npm install`, `npm run build`, and `npm link`, or install a locally produced tarball. Once a release is published, `npm install --global read-the-code-axi` is the direct CLI install.
+
+Example prompt:
+
+> Use $read-the-code to open the exact `main...HEAD` diff for local human review, process durable feedback, and treat approval only as exact-head evidence.
+
 ## CLI
 
 ```text
@@ -115,6 +152,7 @@ npm install
 npm run fixture        # creates .test-state/example-repository
 npm run dev            # frontend development only
 npm run check          # format, lint, types, unit/integration, build, packed install
+npm run test:skill     # skill format, CLI help contract, examples, and links
 npm run test:e2e       # real Chromium review workflow
 npm run release:check  # complete local release gate and npm pack dry run
 ```

@@ -58,6 +58,6 @@ Static serving is allowlisted to `index.html` and generated asset filenames. The
 
 ## Build and package
 
-Vite creates hashed, offline browser assets under `dist/public`. tsup bundles the Node CLI and backend into `dist/cli.js`. The npm `files` allowlist contains `dist`, the README, and license. `scripts/pack-smoke.mjs` packs the actual tarball, installs it into an isolated package, and executes the generated bin; this catches source-tree-only assumptions.
+Vite creates hashed, offline browser assets under `dist/public`. tsup bundles the Node CLI and backend into `dist/cli.js`. The npm `files` allowlist contains `dist`, the canonical `skills` directory, the README, and license. `scripts/pack-smoke.mjs` packs the actual tarball, installs it into an isolated package, verifies standard-path skill discovery, and exercises the generated bin through the durable review lifecycle; this catches source-tree-only assumptions.
 
 Node.js 20.12+ is the supported runtime. The code uses standard `fetch`, `AbortSignal.timeout`, `findLast`, and modern ESM.

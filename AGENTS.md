@@ -6,6 +6,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `src/protocol.ts` is the typed contract shared by CLI, server, browser, exports, and tests. Update `docs/protocol.md` with any contract change.
 - Reviews must remain exact committed-tree comparisons. Preserve direct, shell-free Git invocation, loopback-only serving, capability authorization, secret-free exports, and state outside reviewed repositories; see `docs/architecture.md`.
 - `.test-state/` is the ignored home for generated repositories and isolated state during local tests. `npm run fixture` creates a representative repository there without touching another checkout.
+- `skills/read-the-code/` is the canonical portable agent skill and ships in the npm tarball. Keep its documented CLI surface aligned with `src/cli.ts`; `npm run test:skill` validates the contract.
 
 ## Maintaining this file
 
