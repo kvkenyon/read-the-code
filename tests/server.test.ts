@@ -1,11 +1,15 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildReview } from '../src/core/git';
 import { startServer, type ReviewServer } from '../src/core/server';
 import { SessionStore } from '../src/core/store';
 import { SCHEMA_VERSION } from '../src/protocol';
 import { createFixtureRepo, createTestRoot } from './helpers';
+
+const exec = promisify(execFile);
 
 const cleanup: string[] = [];
 const servers: ReviewServer[] = [];
@@ -14,10 +18,12 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(symbolicHead = false) {
   const root = await createTestRoot('server-');
   cleanup.push(root);
   const fixture = await createFixtureRepo(join(root, 'repo'));
+  if (symbolicHead)
+    await exec('git', ['-C', fixture.path, 'branch', 'review-head', fixture.headSha]);
   const staticDir = join(root, 'public');
   await mkdir(staticDir);
   await writeFile(staticDir + '/index.html', '<!doctype html><title>Review</title>');
@@ -30,7 +36,7 @@ async function setup() {
     repositoryName: 'fixture',
     repositoryPath: fixture.path,
     baseRef: fixture.headSha,
-    headRef: fixture.headSha,
+    headRef: symbolicHead ? 'review-head' : fixture.headSha,
     baseSha: fixture.baseSha,
     headSha: fixture.headSha,
     ...review,
@@ -100,5 +106,18 @@ describe('loopback review server', () => {
     });
     expect(response.status).toBe(413);
     expect(await response.json()).toMatchObject({ error: { code: 'REQUEST_TOO_LARGE' } });
+  });
+
+  it('rejects feedback at the HTTP boundary after the requested head moves', async () => {
+    const { server, fixture, store, id, token } = await setup(true);
+    await exec('git', ['-C', fixture.path, 'branch', '-f', 'review-head', fixture.baseSha]);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/sessions/${id}/feedback`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comments: [{ scope: 'general', body: 'Stale feedback.' }] }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'STALE_REVISION' } });
+    expect((await store.read(id)).events).toHaveLength(0);
   });
 });

@@ -48,8 +48,12 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-test('reviews an exact revision from lines through durable approval', async ({ page }) => {
+test('keyboard-first exact review is safe, accessible, themed, and responsive', async ({
+  page,
+}) => {
+  const requests: string[] = [];
   let injectionExecuted = false;
+  page.on('request', (request) => requests.push(request.url()));
   page.on('dialog', async (dialog) => {
     if (dialog.type() === 'alert') injectionExecuted = true;
     await dialog.accept();
@@ -58,42 +62,73 @@ test('reviews an exact revision from lines through durable approval', async ({ p
   await expect(page).toHaveTitle('Read the Code');
   await expect(page.getByText('fixture-repository')).toBeVisible();
   await expect(page.getByText('6 files')).toBeVisible();
+  expect(requests.every((url) => new URL(url).hostname === '127.0.0.1')).toBe(true);
 
-  await page.getByRole('button', { name: /src\/math\.ts/ }).click();
+  const mathFile = page.getByRole('button', { name: /modified src\/math\.ts/ });
+  await mathFile.click();
   await expect(page.getByRole('heading', { name: 'src/math.ts' })).toBeVisible();
   await expect(page.getByTestId('diff-view')).toHaveClass(/unified/);
   await page.getByRole('button', { name: 'Split' }).click();
   await expect(page.getByTestId('diff-view')).toHaveClass(/split/);
   await page.getByRole('button', { name: 'Unified' }).click();
 
-  await page.getByTestId('line-new-2').click();
-  await page
-    .getByPlaceholder('What should the author understand or change?')
-    .fill('Could this intermediate name explain the unit?');
-  await page.getByRole('button', { name: 'Save draft' }).click();
-  await expect(page.getByText('Could this intermediate name explain the unit?')).toBeVisible();
+  const line = page.getByTestId('line-new-2');
+  await expect(line).toHaveAttribute(
+    'aria-label',
+    /Added, no old line, new line 2: {3}const total/,
+  );
+  await line.focus();
+  await page.keyboard.press('c');
+  const composer = page.getByPlaceholder('What should the author understand or change?');
+  await expect(composer).toBeFocused();
+  await composer.fill('Keyboard safety j k s u g : / ?');
+  await page.keyboard.press('Escape');
+  await expect(composer).toHaveCount(0);
+  await expect(page.getByText('Keyboard safety j k s u g : / ?')).toBeVisible();
+  await expect(line).toBeFocused();
 
+  await line.focus();
+  await page.keyboard.press('/');
+  const find = page.getByPlaceholder('Find files  /');
+  await expect(find).toBeFocused();
+  await find.fill('math');
+  await expect(page.getByRole('heading', { name: 'src/math.ts' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(find).toHaveValue('');
+  await page.keyboard.press('Escape');
+
+  await mathFile.focus();
+  await page.keyboard.press('?');
+  const help = page.getByRole('dialog', { name: 'Keyboard help' });
+  await expect(help).toBeVisible();
+  await expect(help.getByRole('heading', { name: 'Keyboard help' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(mathFile).toBeFocused();
+
+  await page.keyboard.press(':');
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette.getByPlaceholder('Type a command')).toBeFocused();
+  await page.keyboard.type('unified');
+  await expect(palette.getByRole('button', { name: /Use unified diff/ })).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await page.getByLabel('Theme').selectOption('light');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.getByText('Keyboard safety j k s u g : / ?')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'src/math.ts' })).toBeVisible();
+  await page.getByLabel('Theme').selectOption('system');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+  await mathFile.focus();
+  await page.keyboard.press('g');
+  await page.keyboard.press('r');
   await page.getByRole('button', { name: '+ General comment' }).click();
-  await page
-    .getByPlaceholder('What should the author understand or change?')
-    .fill('The change set is focused and readable.');
-  await page.getByRole('button', { name: 'Save draft' }).click();
-  await page.locator('.draft-card').first().getByRole('button', { name: 'Edit' }).click();
-  await page
-    .getByPlaceholder('What should the author understand or change?')
-    .fill('Could this intermediate name explain its unit?');
-  await page.getByRole('button', { name: 'Save draft' }).click();
-
-  await page.getByRole('button', { name: '+ General comment' }).click();
-  await page.getByPlaceholder('What should the author understand or change?').fill('Discard me.');
-  await page.getByRole('button', { name: 'Save draft' }).click();
-  await page
-    .locator('.draft-card')
-    .filter({ hasText: 'Discard me.' })
-    .getByRole('button', { name: 'Discard' })
-    .click();
-  await expect(page.getByText('Discard me.')).toHaveCount(0);
-
+  await composer.fill('The change set is focused and readable.');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await expect(page.getByText('The change set is focused and readable.')).toBeVisible();
   await page.getByRole('button', { name: 'Submit feedback (2)' }).click();
   await expect(page.getByText('Feedback submitted as one durable batch.')).toBeVisible();
   const polled = JSON.parse(
@@ -106,24 +141,34 @@ test('reviews an exact revision from lines through durable approval', async ({ p
   expect(polled.events[0].comments).toHaveLength(2);
   expect(polled.nextCursor).toBe(1);
 
-  await page.getByRole('button', { name: 'Approve revision' }).click();
-  await expect(page.getByText(/Approved [0-9a-f]{9}/)).toBeVisible();
+  await page.keyboard.press('m');
+  await expect(page.locator('.reviewed-button')).toHaveText(/Reviewed/);
+  await page.getByRole('button', { name: 'Approve exact revision' }).click();
+  await expect(page.getByText(/Approved exact head [0-9a-f]{9}/)).toBeVisible();
 
   await page.getByRole('button', { name: /evil/ }).click();
   await expect(page.locator('.diff-view img')).toHaveCount(0);
   expect(injectionExecuted).toBe(false);
 
-  await page.keyboard.press('j');
-  await page.keyboard.press('k');
-  await page.keyboard.press('Tab');
-  expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('BODY');
-
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('button', { name: 'Open changed files' })).toBeVisible();
-  expect(
-    await page.evaluate(() => ({
-      width: document.documentElement.scrollWidth,
-      client: document.documentElement.clientWidth,
-    })),
-  ).toEqual({ width: 390, client: 390 });
+  for (const width of [1440, 720, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(
+      await page.evaluate(() => ({
+        width: document.documentElement.scrollWidth,
+        client: document.documentElement.clientWidth,
+      })),
+    ).toEqual({ width, client: width });
+    await expect(page.getByRole('button', { name: 'Comment on file' })).toBeVisible();
+    await expect(page.locator('.reviewed-button')).toBeVisible();
+    await expect(page.getByRole('button', { name: /Submit feedback/ })).toBeAttached();
+    await expect(page.getByRole('button', { name: 'Approve exact revision' })).toBeAttached();
+    await expect(page.getByRole('button', { name: 'End review' })).toBeAttached();
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.evaluate(() => {
+    document.body.style.zoom = '4';
+  });
+  await expect(page.locator('.reviewed-button')).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Comment on file' })).toBeAttached();
+  await expect(page.getByRole('button', { name: 'Approve exact revision' })).toBeAttached();
 });

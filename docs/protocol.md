@@ -102,6 +102,8 @@ The UI uses these loopback-only routes with `Authorization: Bearer <session capa
 | `POST` | `/api/v1/sessions/:id/approval`                  | Created exact-SHA approval |
 | `POST` | `/api/v1/sessions/:id/end`                       | Idempotent end event       |
 
+Feedback and approval return `STALE_REVISION` with HTTP 409 if the originally requested symbolic head no longer resolves to the session's exact head SHA. Existing events remain readable. The Phase 1 UI and hardening work do not change any successful JSON, TOON, event, or CLI shape; future index, per-file diff, and workspace routes are planned as additive surfaces.
+
 The control ping is private implementation plumbing with a different local capability; it is not an integration API.
 
 Errors have this shape:
