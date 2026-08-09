@@ -48,7 +48,9 @@ A line anchor carries:
 - inclusive line range;
 - a hash for each endpoint derived from path, line kind/numbers/text, and neighboring patch context.
 
-Submission revalidates the anchor against the immutable stored patch. A mismatch fails as `STALE_ANCHOR`; comments are never guessed onto another line. Moving the requested head ref makes the session stale. Existing feedback stays attached to its original revision, existing approval is shown as stale, and new approval is rejected. Opening the moved ref creates a different review identity.
+Submission revalidates the anchor against the immutable stored patch. A mismatch fails as `STALE_ANCHOR`; comments are never guessed onto another line. Moving the requested head ref makes the session stale. Existing feedback stays attached to its original revision, existing approval is shown as stale, and new feedback and approval are rejected at their mutation boundaries. Opening the moved ref creates a different review identity.
+
+Large-review characterization and the additive data-loading direction are documented in [`performance.md`](performance.md). Phase 1 keeps the stable monolithic manifest and event protocol intact.
 
 ## HTTP boundary
 

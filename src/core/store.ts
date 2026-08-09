@@ -294,6 +294,15 @@ export class SessionStore {
     if (Buffer.byteLength(JSON.stringify(drafts)) > LIMITS.maxSubmissionBytes) {
       throw new AppError('Feedback submission exceeds 100 KB', 'SUBMISSION_TOO_LARGE', 4, 413);
     }
+    const snapshot = await this.read(id);
+    if (await isRevisionStale(snapshot.repositoryPath, snapshot.headRef, snapshot.headSha)) {
+      throw new AppError(
+        'The requested head ref moved; open a new revision before submitting feedback',
+        'STALE_REVISION',
+        8,
+        409,
+      );
+    }
     return this.update(id, (record) => {
       if (record.status !== 'open') throw new AppError('Review has ended', 'SESSION_ENDED', 8, 409);
       drafts.forEach((draft) => this.validateDraft(record, draft));

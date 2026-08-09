@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import hljs from 'highlight.js/lib/core';
 import bash from 'highlight.js/lib/languages/bash';
 import css from 'highlight.js/lib/languages/css';
@@ -11,31 +11,41 @@ import xml from 'highlight.js/lib/languages/xml';
 import type {
   CommentDraft,
   CommentSide,
-  DiffHunk,
   DiffLine,
   ReviewEvent,
   ReviewFile,
   ReviewManifest,
 } from '../protocol';
+import {
+  ariaKeyShortcuts,
+  COMMANDS,
+  commandById,
+  commandFor,
+  isTypingTarget,
+  keyStroke,
+  type FocusRegion,
+  type ReviewCommand,
+} from './commands';
 
-hljs.registerLanguage('javascript', javascript);
-hljs.registerLanguage('typescript', typescript);
-hljs.registerLanguage('python', python);
-hljs.registerLanguage('json', json);
-hljs.registerLanguage('bash', bash);
-hljs.registerLanguage('css', css);
-hljs.registerLanguage('xml', xml);
-hljs.registerLanguage('markdown', markdown);
+for (const [name, language] of Object.entries({
+  javascript,
+  typescript,
+  python,
+  json,
+  bash,
+  css,
+  xml,
+  markdown,
+}))
+  hljs.registerLanguage(name, language);
 
 interface Credentials {
   sessionId: string;
   token: string;
 }
-
 interface LocalDraft extends CommentDraft {
   clientId: string;
 }
-
 interface Selection {
   path: string;
   side: CommentSide;
@@ -44,6 +54,18 @@ interface Selection {
   contextHash: string;
   endContextHash: string;
 }
+interface Composer {
+  scope: 'line' | 'file' | 'general';
+  body: string;
+  editId?: string;
+}
+interface FlatLine {
+  line: DiffLine;
+  side: CommentSide;
+  hunk: number;
+  index: number;
+}
+type Theme = 'light' | 'dark' | 'system';
 
 function credentials(): Credentials | undefined {
   const match = /^#\/review\/([a-f0-9]{24})\/([A-Za-z0-9_-]{40,})$/u.exec(window.location.hash);
@@ -67,22 +89,23 @@ function shortSha(value: string): string {
 }
 
 function languageFor(path: string): string | undefined {
-  const extension = path.split('.').pop()?.toLowerCase();
-  return {
-    js: 'javascript',
-    jsx: 'javascript',
-    mjs: 'javascript',
-    ts: 'typescript',
-    tsx: 'typescript',
-    py: 'python',
-    json: 'json',
-    sh: 'bash',
-    bash: 'bash',
-    css: 'css',
-    html: 'xml',
-    xml: 'xml',
-    md: 'markdown',
-  }[extension ?? ''];
+  return (
+    {
+      js: 'javascript',
+      jsx: 'javascript',
+      mjs: 'javascript',
+      ts: 'typescript',
+      tsx: 'typescript',
+      py: 'python',
+      json: 'json',
+      sh: 'bash',
+      bash: 'bash',
+      css: 'css',
+      html: 'xml',
+      xml: 'xml',
+      md: 'markdown',
+    } as Record<string, string>
+  )[path.split('.').pop()?.toLowerCase() ?? ''];
 }
 
 function HighlightedLine({ text, path }: { text: string; path: string }) {
@@ -90,7 +113,7 @@ function HighlightedLine({ text, path }: { text: string; path: string }) {
   const html = language
     ? hljs.highlight(text, { language, ignoreIllegals: true }).value
     : hljs.highlightAuto(text).value;
-  return <code dangerouslySetInnerHTML={{ __html: html || ' ' }} />;
+  return <code aria-hidden="true" dangerouslySetInnerHTML={{ __html: html || ' ' }} />;
 }
 
 async function api<T>(creds: Credentials, suffix = '', init?: RequestInit): Promise<T> {
@@ -108,185 +131,143 @@ async function api<T>(creds: Credentials, suffix = '', init?: RequestInit): Prom
 }
 
 function statusLabel(file: ReviewFile): string {
-  return { modified: 'M', added: 'A', deleted: 'D', renamed: 'R', binary: 'B' }[file.status];
+  return ({ modified: 'M', added: 'A', deleted: 'D', renamed: 'R', binary: 'B' } as const)[
+    file.status
+  ];
 }
 
-function DiffLineButton({
-  line,
-  path,
-  side,
-  selected,
-  onSelect,
-  layout,
+function spokenLine(line: DiffLine): string {
+  const kind =
+    line.kind === 'addition' ? 'Added' : line.kind === 'deletion' ? 'Deleted' : 'Context';
+  const oldNumber = line.oldLine === null ? 'no old line' : `old line ${line.oldLine}`;
+  const newNumber = line.newLine === null ? 'no new line' : `new line ${line.newLine}`;
+  return `${kind}, ${oldNumber}, ${newNumber}: ${line.text || 'blank line'}`;
+}
+
+function Overlay({
+  title,
+  onClose,
+  children,
+  initialFocus,
 }: {
-  line: DiffLine;
-  path: string;
-  side: CommentSide;
-  selected: boolean;
-  onSelect: (line: DiffLine, side: CommentSide, extend: boolean) => void;
-  layout: 'unified' | 'split';
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  initialFocus?: 'input';
 }) {
-  const lineNumber = side === 'old' ? line.oldLine : line.newLine;
-  if (lineNumber === null && layout === 'split')
-    return <div className={`split-empty ${line.kind}`} aria-hidden="true" />;
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const selector = initialFocus === 'input' ? 'input' : 'button, input, [tabindex="0"]';
+    window.requestAnimationFrame(() =>
+      panel.current?.querySelector<HTMLElement>(selector)?.focus(),
+    );
+  }, [initialFocus]);
   return (
-    <button
-      className={`diff-line ${line.kind}${selected ? ' selected' : ''}`}
-      onClick={(event) => onSelect(line, side, event.shiftKey)}
-      aria-label={`Comment on ${side} line ${lineNumber ?? 'unchanged'}`}
-      data-testid={`line-${side}-${lineNumber ?? 'none'}`}
-    >
-      {layout === 'unified' ? (
-        <>
-          <span className="line-no old">{line.oldLine ?? ''}</span>
-          <span className="line-no new">{line.newLine ?? ''}</span>
-        </>
-      ) : (
-        <span className="line-no">{lineNumber ?? ''}</span>
-      )}
-      <span className="line-marker">
-        {line.kind === 'addition' ? '+' : line.kind === 'deletion' ? '−' : ' '}
-      </span>
-      <span className="line-code">
-        <HighlightedLine text={line.text} path={path} />
-      </span>
-      <span className="comment-glyph" aria-hidden="true">
-        +
-      </span>
-    </button>
-  );
-}
-
-function UnifiedHunk({
-  hunk,
-  file,
-  selection,
-  onSelect,
-}: {
-  hunk: DiffHunk;
-  file: ReviewFile;
-  selection?: Selection;
-  onSelect: (line: DiffLine, side: CommentSide, extend: boolean) => void;
-}) {
-  return (
-    <section className="hunk">
-      <div className="hunk-header">{hunk.header}</div>
-      {hunk.lines.map((line, index) => {
-        const side: CommentSide = line.kind === 'deletion' ? 'old' : 'new';
-        const number = side === 'old' ? line.oldLine : line.newLine;
-        const selected =
-          selection?.side === side &&
-          number !== null &&
-          number >= selection.startLine &&
-          number <= selection.endLine;
-        return (
-          <DiffLineButton
-            key={`${line.oldLine}-${line.newLine}-${index}`}
-            line={line}
-            path={file.path}
-            side={side}
-            selected={selected}
-            onSelect={onSelect}
-            layout="unified"
-          />
-        );
-      })}
-    </section>
-  );
-}
-
-function SplitHunk({
-  hunk,
-  file,
-  selection,
-  onSelect,
-}: {
-  hunk: DiffHunk;
-  file: ReviewFile;
-  selection?: Selection;
-  onSelect: (line: DiffLine, side: CommentSide, extend: boolean) => void;
-}) {
-  const rows: Array<{ old?: DiffLine; next?: DiffLine }> = [];
-  let index = 0;
-  while (index < hunk.lines.length) {
-    const line = hunk.lines[index];
-    if (line.kind === 'context') {
-      rows.push({ old: line, next: line });
-      index += 1;
-      continue;
-    }
-    const removed: DiffLine[] = [];
-    const added: DiffLine[] = [];
-    while (hunk.lines[index]?.kind === 'deletion') removed.push(hunk.lines[index++]);
-    while (hunk.lines[index]?.kind === 'addition') added.push(hunk.lines[index++]);
-    for (let row = 0; row < Math.max(removed.length, added.length); row += 1) {
-      rows.push({ old: removed[row], next: added[row] });
-    }
-  }
-  return (
-    <section className="hunk split-hunk">
-      <div className="hunk-header">{hunk.header}</div>
-      {rows.map((row, rowIndex) => (
-        <div className="split-row" key={rowIndex}>
-          {row.old ? (
-            <DiffLineButton
-              line={row.old}
-              path={file.path}
-              side="old"
-              selected={Boolean(
-                selection?.side === 'old' &&
-                row.old.oldLine &&
-                row.old.oldLine >= selection.startLine &&
-                row.old.oldLine <= selection.endLine,
-              )}
-              onSelect={onSelect}
-              layout="split"
-            />
-          ) : (
-            <div className="split-empty deletion" />
-          )}
-          {row.next ? (
-            <DiffLineButton
-              line={row.next}
-              path={file.path}
-              side="new"
-              selected={Boolean(
-                selection?.side === 'new' &&
-                row.next.newLine &&
-                row.next.newLine >= selection.startLine &&
-                row.next.newLine <= selection.endLine,
-              )}
-              onSelect={onSelect}
-              layout="split"
-            />
-          ) : (
-            <div className="split-empty addition" />
-          )}
-        </div>
-      ))}
-    </section>
-  );
-}
-
-function EmptyFile({ file }: { file: ReviewFile }) {
-  return (
-    <div className="file-empty">
-      <span className="empty-icon">{file.binary ? '◈' : file.truncated ? '↯' : '◇'}</span>
-      <h3>
-        {file.binary
-          ? 'Binary file changed'
-          : file.truncated
-            ? 'Diff contained for safety'
-            : 'No textual hunks'}
-      </h3>
-      <p>
-        {file.binary
-          ? 'Binary content is never rendered or executed.'
-          : file.truncated
-            ? 'This file exceeded the 1 MB per-file patch limit.'
-            : 'Git recorded metadata-only or empty content changes.'}
-      </p>
+    <div className="overlay" role="presentation">
+      <div
+        ref={panel}
+        className="overlay-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            onClose();
+            return;
+          }
+          if (event.key !== 'Tab') return;
+          const items = [
+            ...(panel.current?.querySelectorAll<HTMLElement>(
+              'button:not(:disabled), input, [tabindex="0"]',
+            ) ?? []),
+          ];
+          if (!items.length) return;
+          const first = items[0];
+          const last = items.at(-1)!;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
+      >
+        {children}
+      </div>
     </div>
+  );
+}
+
+function InlineComposer({
+  composer,
+  selection,
+  path,
+  onChange,
+  onKeep,
+  onClose,
+}: {
+  composer: Composer;
+  selection?: Selection;
+  path?: string;
+  onChange: (body: string) => void;
+  onKeep: () => void;
+  onClose: () => void;
+}) {
+  const title =
+    composer.scope === 'general'
+      ? 'General review comment'
+      : composer.scope === 'file'
+        ? `File comment · ${visiblePath(path ?? '')}`
+        : `Line comment · ${selection?.side} ${selection?.startLine}${selection && selection.endLine !== selection.startLine ? `–${selection.endLine}` : ''}`;
+  return (
+    <section className="inline-composer" aria-labelledby="composer-title" data-region="composer">
+      <div className="composer-title">
+        <div>
+          <span className="eyebrow">Recoverable draft</span>
+          <h2 id="composer-title">{title}</h2>
+        </div>
+        <button onClick={onClose} aria-label="Close comment composer">
+          ×
+        </button>
+      </div>
+      <label>
+        <span className="sr-only">Comment</span>
+        <textarea
+          name="review-comment"
+          autoFocus
+          maxLength={20000}
+          value={composer.body}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              onKeep();
+            }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              onKeep();
+            }
+          }}
+          placeholder="What should the author understand or change?"
+        />
+      </label>
+      <div className="composer-footer">
+        <span>
+          {new TextEncoder().encode(composer.body).length.toLocaleString()} / 20,000 bytes
+        </span>
+        <div>
+          <button className="secondary-button" onClick={onKeep}>
+            Keep draft & close
+          </button>
+          <button className="primary-button" disabled={!composer.body.trim()} onClick={onKeep}>
+            Save draft
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -297,19 +278,34 @@ export function App() {
   const [activePath, setActivePath] = useState('');
   const [query, setQuery] = useState('');
   const [layout, setLayout] = useState<'unified' | 'split'>('unified');
+  const [wrap, setWrap] = useState(false);
   const [reviewed, setReviewed] = useState<Set<string>>(new Set());
   const [drafts, setDrafts] = useState<LocalDraft[]>([]);
   const [selection, setSelection] = useState<Selection>();
-  const [composer, setComposer] = useState<{
-    scope: 'line' | 'file' | 'general';
-    body: string;
-    editId?: string;
-  }>();
+  const [composer, setComposer] = useState<Composer>();
   const [trayOpen, setTrayOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [overlay, setOverlay] = useState<'help' | 'palette'>();
+  const [paletteQuery, setPaletteQuery] = useState('');
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem('read-the-code:theme') as Theme | null) ?? 'system',
+  );
+  const [characterShortcuts, setCharacterShortcuts] = useState(
+    () => localStorage.getItem('read-the-code:character-shortcuts') !== 'false',
+  );
+  const [wideLayout, setWideLayout] = useState(() => window.innerWidth >= 900);
+  const [focusRegion, setFocusRegion] = useState<FocusRegion>('files');
+  const [fileCursor, setFileCursor] = useState(0);
+  const [lineCursor, setLineCursor] = useState(0);
+  const [pendingChord, setPendingChord] = useState('');
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+  const fileRefs = useRef(new Map<number, HTMLButtonElement>());
+  const lineRefs = useRef(new Map<number, HTMLButtonElement>());
+  const trayRef = useRef<HTMLButtonElement>(null);
+  const overlayTrigger = useRef<HTMLElement | null>(null);
 
   const refresh = useCallback(async () => {
     if (!creds) return;
@@ -330,27 +326,101 @@ export function App() {
 
   useEffect(() => {
     if (!manifest) return;
-    const key = `read-the-code:${manifest.sessionId}:reviewed`;
-    const stored = JSON.parse(localStorage.getItem(key) ?? '[]') as string[];
+    const prefix = `read-the-code:${manifest.sessionId}`;
+    const savedReviewed = JSON.parse(
+      localStorage.getItem(`${prefix}:reviewed`) ?? '[]',
+    ) as string[];
+    const savedDrafts = JSON.parse(
+      localStorage.getItem(`${prefix}:drafts`) ?? '[]',
+    ) as LocalDraft[];
     setReviewed(
-      new Set(stored.filter((path) => manifest.files.some((file) => file.path === path))),
+      new Set(savedReviewed.filter((path) => manifest.files.some((file) => file.path === path))),
+    );
+    setDrafts(
+      savedDrafts.filter(
+        (draft) => !draft.path || manifest.files.some((file) => file.path === draft.path),
+      ),
     );
   }, [manifest]);
 
+  useEffect(() => {
+    if (manifest)
+      localStorage.setItem(`read-the-code:${manifest.sessionId}:drafts`, JSON.stringify(drafts));
+  }, [drafts, manifest]);
+  useEffect(() => {
+    localStorage.setItem('read-the-code:theme', theme);
+    document.documentElement.dataset.themePreference = theme;
+    window.dispatchEvent(new CustomEvent('read-the-code-theme'));
+  }, [theme]);
+  useEffect(() => {
+    localStorage.setItem('read-the-code:character-shortcuts', String(characterShortcuts));
+  }, [characterShortcuts]);
+  useEffect(() => {
+    const update = () => setWideLayout(window.innerWidth >= 900);
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
   const activeFile = manifest?.files.find((file) => file.path === activePath);
   const filteredFiles =
-    manifest?.files.filter((file) => file.path.toLowerCase().includes(query.toLowerCase())) ?? [];
+    manifest?.files.filter((file) =>
+      visiblePath(file.path).toLowerCase().includes(query.toLowerCase()),
+    ) ?? [];
+  const flatLines = useMemo<FlatLine[]>(
+    () =>
+      activeFile?.hunks.flatMap((hunk, hunkIndex) =>
+        hunk.lines.map((line, index) => ({
+          line,
+          side: line.kind === 'deletion' ? 'old' : 'new',
+          hunk: hunkIndex,
+          index,
+        })),
+      ) ?? [],
+    [activeFile],
+  );
   const commentCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const event of events) {
-      if (event.type !== 'feedback') continue;
-      for (const comment of event.comments)
-        if (comment.path) counts.set(comment.path, (counts.get(comment.path) ?? 0) + 1);
-    }
+    for (const event of events)
+      if (event.type === 'feedback')
+        for (const comment of event.comments)
+          if (comment.path) counts.set(comment.path, (counts.get(comment.path) ?? 0) + 1);
     for (const draft of drafts)
       if (draft.path) counts.set(draft.path, (counts.get(draft.path) ?? 0) + 1);
     return counts;
   }, [events, drafts]);
+  const readOnly = manifest?.status === 'ended';
+  const writable = Boolean(manifest && !manifest.stale && !readOnly);
+
+  const announce = (message: string) => {
+    setNotice(message);
+    window.setTimeout(() => setNotice((value) => (value === message ? '' : value)), 4000);
+  };
+  const focusFile = (index: number) => {
+    const next = Math.max(0, Math.min(filteredFiles.length - 1, index));
+    setFileCursor(next);
+    window.requestAnimationFrame(() => fileRefs.current.get(next)?.focus());
+  };
+  const focusLine = (index: number, extend = false) => {
+    const next = Math.max(0, Math.min(flatLines.length - 1, index));
+    setLineCursor(next);
+    const item = flatLines[next];
+    if (extend && selection && item) selectLine(item.line, item.side, true);
+    window.requestAnimationFrame(() => {
+      lineRefs.current.get(next)?.focus();
+      lineRefs.current.get(next)?.scrollIntoView({ block: 'nearest' });
+    });
+    if (item) announce(spokenLine(item.line));
+  };
+
+  const chooseFile = useCallback((path: string, focusDiff = false) => {
+    setActivePath(path);
+    setSelection(undefined);
+    setComposer(undefined);
+    setLineCursor(0);
+    setSidebarOpen(false);
+    document.querySelector('.review-main')?.scrollTo({ top: 0 });
+    if (focusDiff) window.requestAnimationFrame(() => lineRefs.current.get(0)?.focus());
+  }, []);
 
   const selectLine = (line: DiffLine, side: CommentSide, extend: boolean): void => {
     const lineNumber = side === 'old' ? line.oldLine : line.newLine;
@@ -359,11 +429,11 @@ export function App() {
       const start = Math.min(selection.startLine, lineNumber);
       const end = Math.max(selection.endLine, lineNumber);
       const all = activeFile.hunks.flatMap((hunk) => hunk.lines);
-      const numberOf = (candidate: DiffLine): number | null =>
+      const numberOf = (candidate: DiffLine) =>
         side === 'old' ? candidate.oldLine : candidate.newLine;
       const startLine = all.find((candidate) => numberOf(candidate) === start);
       const endLine = all.find((candidate) => numberOf(candidate) === end);
-      if (startLine && endLine) {
+      if (startLine && endLine)
         setSelection({
           path: activeFile.path,
           side,
@@ -372,8 +442,7 @@ export function App() {
           contextHash: startLine.contextHash,
           endContextHash: endLine.contextHash,
         });
-      }
-    } else {
+    } else
       setSelection({
         path: activeFile.path,
         side,
@@ -382,137 +451,307 @@ export function App() {
         contextHash: line.contextHash,
         endContextHash: line.contextHash,
       });
-    }
-    setComposer({ scope: 'line', body: '' });
+    announce(`Selected ${side} line ${lineNumber}. Press C to comment or V then J or K to extend.`);
   };
 
-  const saveDraft = (): void => {
-    if (!composer || !composer.body.trim() || !manifest) return;
+  const openComposer = (scope: Composer['scope'], edit?: LocalDraft) => {
+    if (!writable) return;
+    if (scope === 'line' && !selection && !edit?.anchor) {
+      const item = flatLines[lineCursor];
+      if (item) selectLine(item.line, item.side, false);
+      else return;
+    }
+    if (edit?.anchor)
+      setSelection({
+        path: edit.anchor.path,
+        side: edit.anchor.side,
+        startLine: edit.anchor.startLine,
+        endLine: edit.anchor.endLine,
+        contextHash: edit.anchor.contextHash,
+        endContextHash: edit.anchor.endContextHash,
+      });
+    setComposer({ scope, body: edit?.body ?? '', editId: edit?.clientId });
+    window.requestAnimationFrame(() =>
+      document.querySelector<HTMLTextAreaElement>('.inline-composer textarea')?.focus(),
+    );
+  };
+
+  const keepDraft = (): void => {
+    if (!composer || !manifest) return;
     const existing = drafts.find((draft) => draft.clientId === composer.editId);
-    const scope = composer.scope;
-    const draft: LocalDraft = {
-      clientId: existing?.clientId ?? crypto.randomUUID(),
-      scope,
-      body: composer.body.trim(),
-      ...(scope !== 'general' && activeFile ? { path: existing?.path ?? activeFile.path } : {}),
-      ...(scope === 'line' && (existing?.anchor || selection)
-        ? {
-            anchor:
-              existing?.anchor ??
-              ({
+    if (composer.body.trim()) {
+      const draft: LocalDraft = {
+        clientId: existing?.clientId ?? crypto.randomUUID(),
+        scope: composer.scope,
+        body: composer.body.trim(),
+        ...(composer.scope !== 'general' && activeFile
+          ? { path: existing?.path ?? activeFile.path }
+          : {}),
+        ...(composer.scope === 'line' && (existing?.anchor || selection)
+          ? {
+              anchor: existing?.anchor ?? {
                 revision: { baseSha: manifest.baseSha, headSha: manifest.headSha },
                 ...selection!,
-              } as LocalDraft['anchor']),
-          }
-        : {}),
-    };
-    setDrafts((current) =>
-      existing
-        ? current.map((item) => (item.clientId === existing.clientId ? draft : item))
-        : [...current, draft],
-    );
+              },
+            }
+          : {}),
+      };
+      setDrafts((current) =>
+        existing
+          ? current.map((item) => (item.clientId === existing.clientId ? draft : item))
+          : [...current, draft],
+      );
+      announce('Draft saved privately in this browser.');
+    }
     setComposer(undefined);
     setSelection(undefined);
     setTrayOpen(true);
+    window.requestAnimationFrame(() => {
+      const anchor = lineRefs.current.get(lineCursor);
+      if (anchor) anchor.focus();
+      else trayRef.current?.focus();
+    });
   };
 
-  const submit = async (): Promise<void> => {
-    if (!creds || drafts.length === 0) return;
-    setBusy('submit');
-    setError('');
-    try {
-      const comments: CommentDraft[] = drafts.map((localDraft) => {
-        const draft = { ...localDraft };
-        delete (draft as Partial<LocalDraft>).clientId;
-        return draft;
-      });
-      await api(creds, '/feedback', { method: 'POST', body: JSON.stringify({ comments }) });
-      setDrafts([]);
-      setSelection(undefined);
-      setNotice('Feedback submitted as one durable batch.');
-      await refresh();
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const approve = async (): Promise<void> => {
-    if (!creds || manifest?.stale) return;
-    if (
-      !window.confirm(`Approve exactly ${manifest ? shortSha(manifest.headSha) : 'this revision'}?`)
-    )
-      return;
-    setBusy('approve');
-    try {
-      await api(creds, '/approval', { method: 'POST', body: '{}' });
-      setNotice(`Approved exact head ${shortSha(manifest!.headSha)}.`);
-      await refresh();
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const endReview = async (): Promise<void> => {
-    if (
-      !creds ||
-      !window.confirm('End this review session? Unsubmitted drafts will remain only in this tab.')
-    )
-      return;
-    setBusy('end');
-    try {
-      await api(creds, '/end', { method: 'POST', body: '{}' });
-      setNotice('Review ended. This local tab is now read-only.');
-      await refresh();
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const toggleReviewed = (): void => {
+  const toggleReviewed = () => {
     if (!activeFile || !manifest) return;
     const next = new Set(reviewed);
     if (next.has(activeFile.path)) next.delete(activeFile.path);
     else next.add(activeFile.path);
     setReviewed(next);
     localStorage.setItem(`read-the-code:${manifest.sessionId}:reviewed`, JSON.stringify([...next]));
+    announce(`${next.size} of ${manifest.files.length} files reviewed.`);
   };
 
-  const chooseFile = useCallback((path: string) => {
-    setActivePath(path);
-    setSelection(undefined);
-    setComposer(undefined);
-    setSidebarOpen(false);
-    document.querySelector('.review-main')?.scrollTo({ top: 0 });
-  }, []);
+  const submit = async () => {
+    if (!creds || !drafts.length) return;
+    setBusy('submit');
+    setError('');
+    try {
+      const comments = drafts.map((item) => {
+        const draft: CommentDraft = {
+          scope: item.scope,
+          body: item.body,
+          ...(item.path ? { path: item.path } : {}),
+          ...(item.anchor ? { anchor: item.anchor } : {}),
+        };
+        return draft;
+      });
+      await api(creds, '/feedback', { method: 'POST', body: JSON.stringify({ comments }) });
+      setDrafts([]);
+      setSelection(undefined);
+      announce('Feedback submitted as one durable batch.');
+      await refresh();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+  const approve = async () => {
+    if (!creds || !manifest || manifest.stale) return;
+    if (
+      !window.confirm(
+        `Approve exactly ${manifest.headSha}?${reviewed.size < manifest.files.length ? ` ${manifest.files.length - reviewed.size} files are not marked reviewed.` : ''}`,
+      )
+    )
+      return;
+    setBusy('approve');
+    try {
+      await api(creds, '/approval', { method: 'POST', body: '{}' });
+      announce(`Approved exact head ${shortSha(manifest.headSha)}.`);
+      await refresh();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+  const endReview = async () => {
+    if (
+      !creds ||
+      !window.confirm('End this exact review? Recoverable browser drafts will not be submitted.')
+    )
+      return;
+    setBusy('end');
+    try {
+      await api(creds, '/end', { method: 'POST', body: '{}' });
+      announce('Review ended. This exact record is now read-only.');
+      await refresh();
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const closeOverlay = () => {
+    setOverlay(undefined);
+    window.requestAnimationFrame(() => overlayTrigger.current?.focus());
+  };
+  const openOverlay = (next: 'help' | 'palette') => {
+    overlayTrigger.current = document.activeElement as HTMLElement;
+    setPaletteQuery('');
+    setOverlay(next);
+  };
+
+  // The keyboard listener intentionally rebinds to this render's exact review state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const runCommand = (command: ReviewCommand) => {
+    const activeIndex = manifest?.files.findIndex((file) => file.path === activePath) ?? -1;
+    switch (command.id) {
+      case 'help':
+        openOverlay('help');
+        break;
+      case 'palette':
+        openOverlay('palette');
+        break;
+      case 'quick-find':
+        setSidebarOpen(true);
+        window.requestAnimationFrame(() => searchRef.current?.focus());
+        break;
+      case 'focus-files':
+        setSidebarOpen(true);
+        window.requestAnimationFrame(() => focusFile(fileCursor));
+        break;
+      case 'focus-diff':
+        focusLine(lineCursor);
+        break;
+      case 'focus-review':
+        setTrayOpen(true);
+        window.requestAnimationFrame(() => trayRef.current?.focus());
+        break;
+      case 'next-file':
+        if (manifest && activeIndex < manifest.files.length - 1)
+          chooseFile(manifest.files[activeIndex + 1].path, true);
+        break;
+      case 'previous-file':
+        if (manifest && activeIndex > 0) chooseFile(manifest.files[activeIndex - 1].path, true);
+        break;
+      case 'toggle-reviewed':
+        toggleReviewed();
+        break;
+      case 'file-comment':
+        openComposer('file');
+        break;
+      case 'general-comment':
+        openComposer('general');
+        break;
+      case 'row-next':
+        if (focusRegion === 'files') focusFile(fileCursor + 1);
+        else focusLine(lineCursor + 1, Boolean(selection));
+        break;
+      case 'row-previous':
+        if (focusRegion === 'files') focusFile(fileCursor - 1);
+        else focusLine(lineCursor - 1, Boolean(selection));
+        break;
+      case 'first-item':
+        if (focusRegion === 'files') focusFile(0);
+        else focusLine(0);
+        break;
+      case 'last-item':
+        if (focusRegion === 'files') focusFile(filteredFiles.length - 1);
+        else focusLine(flatLines.length - 1);
+        break;
+      case 'open-item':
+        if (filteredFiles[fileCursor]) chooseFile(filteredFiles[fileCursor].path, true);
+        break;
+      case 'next-hunk': {
+        const current = flatLines[lineCursor]?.hunk ?? 0;
+        const next = flatLines.findIndex((item) => item.hunk > current);
+        if (next >= 0) focusLine(next);
+        break;
+      }
+      case 'previous-hunk': {
+        const current = flatLines[lineCursor]?.hunk ?? 0;
+        const reversed = flatLines.map((item) => item.hunk).lastIndexOf(current - 1);
+        if (reversed >= 0) focusLine(reversed);
+        break;
+      }
+      case 'select-line': {
+        const item = flatLines[lineCursor];
+        if (item) selectLine(item.line, item.side, Boolean(selection));
+        break;
+      }
+      case 'compose-line':
+        openComposer('line');
+        break;
+      case 'view-unified':
+        setLayout('unified');
+        break;
+      case 'view-split':
+        if (wideLayout) setLayout('split');
+        else announce('Split view is unavailable below 900 pixels.');
+        break;
+      case 'toggle-wrap':
+        setWrap((value) => !value);
+        break;
+    }
+  };
 
   useEffect(() => {
-    const handler = (event: KeyboardEvent): void => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+    const handler = (event: KeyboardEvent) => {
+      if (
+        event.isComposing ||
+        event.key === 'Dead' ||
+        overlay ||
+        composer ||
+        isTypingTarget(event.target) ||
+        !manifest
+      )
         return;
-      if (!manifest) return;
-      const index = manifest.files.findIndex((file) => file.path === activePath);
-      if (event.key === 'j' && index < manifest.files.length - 1)
-        chooseFile(manifest.files[index + 1].path);
-      if (event.key === 'k' && index > 0) chooseFile(manifest.files[index - 1].path);
-      if (event.key === 'u') setLayout('unified');
-      if (event.key === 's') setLayout('split');
-      if (event.key === 'g') setComposer({ scope: 'general', body: '' });
       if (event.key === 'Escape') {
-        setComposer(undefined);
-        setSelection(undefined);
+        if (selection) {
+          event.preventDefault();
+          setSelection(undefined);
+          announce('Line selection cleared.');
+        } else if (trayOpen) {
+          event.preventDefault();
+          setTrayOpen(false);
+        } else if (sidebarOpen) {
+          event.preventDefault();
+          setSidebarOpen(false);
+        }
+        return;
       }
+      const stroke = keyStroke(event);
+      const sequence = pendingChord ? `${pendingChord} ${stroke.toLowerCase()}` : stroke;
+      const scope = focusRegion === 'files' ? 'files' : 'diff';
+      const command = commandFor(sequence, scope, {
+        characterShortcuts,
+        writable,
+        activeFile: Boolean(activeFile),
+      });
+      if (command) {
+        event.preventDefault();
+        setPendingChord('');
+        runCommand(command);
+        return;
+      }
+      if (!pendingChord && ['g', 'a', 'd'].includes(stroke.toLowerCase()) && characterShortcuts) {
+        event.preventDefault();
+        setPendingChord(stroke.toLowerCase());
+        window.setTimeout(() => setPendingChord(''), 1200);
+      } else setPendingChord('');
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [activePath, chooseFile, manifest]);
+  }, [
+    activeFile,
+    characterShortcuts,
+    composer,
+    focusRegion,
+    manifest,
+    overlay,
+    pendingChord,
+    runCommand,
+    selection,
+    sidebarOpen,
+    trayOpen,
+    writable,
+  ]);
 
-  if (!creds) {
+  if (!creds)
     return (
       <main className="gate-state">
         <div className="brand-mark">RC</div>
@@ -520,8 +759,7 @@ export function App() {
         <p>Open this review with the authenticated local URL returned by read-the-code-axi.</p>
       </main>
     );
-  }
-  if (error && !manifest) {
+  if (error && !manifest)
     return (
       <main className="gate-state">
         <div className="brand-mark danger">!</div>
@@ -529,8 +767,7 @@ export function App() {
         <p>{error}</p>
       </main>
     );
-  }
-  if (!manifest) {
+  if (!manifest)
     return (
       <main className="gate-state" aria-live="polite">
         <div className="loading-ring" />
@@ -538,14 +775,21 @@ export function App() {
         <p>Loading the exact pinned revision from local session storage.</p>
       </main>
     );
-  }
-
   const approval = events.findLast((event) => event.type === 'approval');
-  const readOnly = manifest.status === 'ended';
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
+    <div
+      className="app-shell"
+      onFocusCapture={(event) => {
+        const region = (event.target as HTMLElement).closest<HTMLElement>('[data-region]')?.dataset
+          .region as FocusRegion | undefined;
+        if (region) setFocusRegion(region);
+      }}
+    >
+      <a className="skip-link" href="#review-diff">
+        Skip to diff
+      </a>
+      <header className="topbar" data-region="revision">
         <button
           className="mobile-menu"
           onClick={() => setSidebarOpen(true)}
@@ -560,33 +804,70 @@ export function App() {
             <strong>{visiblePath(manifest.repository)}</strong>
           </div>
         </div>
-        <div className="revision-route" aria-label="Review revision">
+        <div
+          className="revision-route"
+          aria-label={`Review revision ${manifest.baseSha} to ${manifest.headSha}`}
+        >
           <span>{manifest.baseRef}</span>
           <code>{shortSha(manifest.baseSha)}</code>
           <i>→</i>
           <span>{manifest.headRef}</span>
           <code>{shortSha(manifest.headSha)}</code>
         </div>
-        <div className="summary-pills">
-          <span>{manifest.summary.files} files</span>
-          <span className="plus">+{manifest.summary.additions}</span>
-          <span className="minus">−{manifest.summary.deletions}</span>
+        <div className="top-actions">
+          <span className="summary-pills">
+            <span>{manifest.summary.files} files</span>
+            <span className="plus">+{manifest.summary.additions}</span>
+            <span className="minus">−{manifest.summary.deletions}</span>
+          </span>
+          <select
+            name="theme"
+            aria-label="Theme"
+            value={theme}
+            onChange={(event) => setTheme(event.target.value as Theme)}
+          >
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+          <button
+            onClick={(event) => {
+              overlayTrigger.current = event.currentTarget;
+              openOverlay('palette');
+            }}
+            aria-label="Open command palette"
+            aria-keyshortcuts={ariaKeyShortcuts('palette')}
+          >
+            ⌘
+          </button>
+          <button
+            onClick={(event) => {
+              overlayTrigger.current = event.currentTarget;
+              openOverlay('help');
+            }}
+            aria-label="Open keyboard help"
+            aria-keyshortcuts={ariaKeyShortcuts('help')}
+          >
+            ?
+          </button>
         </div>
       </header>
-
       {(manifest.stale || readOnly) && (
         <div className={`state-banner ${manifest.stale ? 'warning' : ''}`} role="alert">
           <strong>{manifest.stale ? 'Head ref moved' : 'Review ended'}</strong>
           <span>
             {manifest.stale
-              ? `This tab remains pinned to ${shortSha(manifest.headSha)}. Open a new revision to comment or approve the moved head.`
+              ? `Pinned to ${manifest.headSha}. Open a new exact revision to comment or approve.`
               : 'The exact review record is preserved; new comments and approvals are disabled.'}
           </span>
         </div>
       )}
-
       <div className="workspace">
-        <aside className={`file-sidebar ${sidebarOpen ? 'open' : ''}`} aria-label="Changed files">
+        <aside
+          className={`file-sidebar ${sidebarOpen ? 'open' : ''}`}
+          aria-label="Changed files"
+          data-region="files"
+        >
           <div className="sidebar-heading">
             <div>
               <span className="eyebrow">Change set</span>
@@ -602,19 +883,43 @@ export function App() {
           </div>
           <label className="search-box">
             <span aria-hidden="true">⌕</span>
-            <span className="sr-only">Filter changed files</span>
+            <span className="sr-only">Find changed files</span>
             <input
+              name="file-search"
+              ref={searchRef}
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Filter files"
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setFileCursor(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  if (query) setQuery('');
+                  else {
+                    setSidebarOpen(false);
+                    fileRefs.current.get(fileCursor)?.focus();
+                  }
+                }
+                if (event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  focusFile(0);
+                }
+              }}
+              placeholder="Find files  /"
+              aria-keyshortcuts={ariaKeyShortcuts('quick-find')}
             />
             {query && (
-              <button onClick={() => setQuery('')} aria-label="Clear file filter">
+              <button onClick={() => setQuery('')} aria-label="Clear file search">
                 ×
               </button>
             )}
           </label>
-          <div className="review-progress">
+          <div
+            className="review-progress"
+            aria-label={`${reviewed.size} of ${manifest.files.length} files reviewed`}
+          >
             <div>
               <span>Reviewed</span>
               <b>
@@ -629,39 +934,48 @@ export function App() {
               />
             </div>
           </div>
-          <nav className="file-list">
-            {filteredFiles.map((file) => (
+          <nav className="file-list" aria-label="Changed file list">
+            {filteredFiles.map((file, index) => (
               <button
+                ref={(node) => {
+                  if (node) fileRefs.current.set(index, node);
+                  else fileRefs.current.delete(index);
+                }}
+                tabIndex={index === fileCursor ? 0 : -1}
                 key={file.path}
                 className={file.path === activePath ? 'active' : ''}
-                onClick={() => chooseFile(file.path)}
+                onFocus={() => setFileCursor(index)}
+                onClick={() => chooseFile(file.path, true)}
                 aria-current={file.path === activePath ? 'page' : undefined}
+                aria-label={`${file.status} ${visiblePath(file.path)}${reviewed.has(file.path) ? ', reviewed' : ', not reviewed'}${commentCounts.has(file.path) ? `, ${commentCounts.get(file.path)} comments` : ''}`}
               >
-                <span className={`status-dot ${file.status}`}>{statusLabel(file)}</span>
-                <span className="file-name" title={visiblePath(file.path)}>
-                  {visiblePath(file.path)}
+                <span className={`status-dot ${file.status}`} aria-hidden="true">
+                  {statusLabel(file)}
                 </span>
+                <span className="file-name">{visiblePath(file.path)}</span>
                 {commentCounts.has(file.path) && (
                   <span className="count-badge">{commentCounts.get(file.path)}</span>
                 )}
-                <span className={`review-check ${reviewed.has(file.path) ? 'done' : ''}`}>
+                <span
+                  className={`review-check ${reviewed.has(file.path) ? 'done' : ''}`}
+                  aria-hidden="true"
+                >
                   {reviewed.has(file.path) ? '✓' : '○'}
                 </span>
               </button>
             ))}
-            {filteredFiles.length === 0 && <p className="no-files">No files match “{query}”.</p>}
+            {!filteredFiles.length && <p className="no-files">No files match “{query}”.</p>}
           </nav>
           <div className="keyboard-card">
             <span>
-              <kbd>J</kbd>
-              <kbd>K</kbd> files
+              <kbd>{commandById('row-next').bindings[0]}</kbd>
+              <kbd>{commandById('row-previous').bindings[0]}</kbd> move
             </span>
             <span>
-              <kbd>U</kbd>
-              <kbd>S</kbd> layout
+              <kbd>{commandById('quick-find').bindings[0]}</kbd> find
             </span>
             <span>
-              <kbd>G</kbd> general note
+              <kbd>{commandById('help').bindings[0]}</kbd> help
             </span>
           </div>
         </aside>
@@ -669,11 +983,10 @@ export function App() {
           <button
             className="sidebar-scrim"
             onClick={() => setSidebarOpen(false)}
-            aria-label="Close sidebar"
+            aria-label="Close changed files"
           />
         )}
-
-        <main className="review-main">
+        <main className="review-main" id="review-diff" tabIndex={-1}>
           {activeFile ? (
             <article className="file-review">
               <div className="file-toolbar">
@@ -695,22 +1008,29 @@ export function App() {
                     </button>
                     <button
                       className={layout === 'split' ? 'active' : ''}
-                      onClick={() => setLayout('split')}
+                      onClick={() =>
+                        wideLayout
+                          ? setLayout('split')
+                          : announce('Split view is unavailable below 900 pixels.')
+                      }
                       aria-pressed={layout === 'split'}
+                      aria-disabled={!wideLayout}
                     >
                       Split
                     </button>
                   </div>
                   <button
                     className="secondary-button"
-                    onClick={() => setComposer({ scope: 'file', body: '' })}
-                    disabled={readOnly || manifest.stale}
+                    onClick={() => openComposer('file')}
+                    disabled={!writable}
+                    aria-keyshortcuts={ariaKeyShortcuts('file-comment')}
                   >
                     Comment on file
                   </button>
                   <button
                     className={`reviewed-button ${reviewed.has(activeFile.path) ? 'done' : ''}`}
                     onClick={toggleReviewed}
+                    aria-keyshortcuts={ariaKeyShortcuts('toggle-reviewed')}
                   >
                     {reviewed.has(activeFile.path) ? '✓ Reviewed' : 'Mark reviewed'}
                   </button>
@@ -722,45 +1042,148 @@ export function App() {
                 <span>
                   {activeFile.hunks.length} {activeFile.hunks.length === 1 ? 'hunk' : 'hunks'}
                 </span>
-                <span className="hint">Select a line · Shift-click for a range</span>
+                <span className="hint">
+                  Click a line to select · Shift-click for a range · C to comment
+                </span>
               </div>
-              <div className={`diff-view ${layout}`} data-testid="diff-view">
-                {activeFile.hunks.length === 0 ? (
-                  <EmptyFile file={activeFile} />
+              {composer && composer.scope !== 'line' && (
+                <InlineComposer
+                  composer={composer}
+                  path={activeFile.path}
+                  onChange={(body) => setComposer({ ...composer, body })}
+                  onKeep={keepDraft}
+                  onClose={keepDraft}
+                />
+              )}
+              <div
+                className={`diff-view ${layout} ${wrap ? 'wrap' : ''}`}
+                data-testid="diff-view"
+                data-region="diff"
+                role="listbox"
+                aria-label={`Accessible unified diff for ${visiblePath(activeFile.path)}`}
+              >
+                {!activeFile.hunks.length ? (
+                  <div className="file-empty">
+                    <span className="empty-icon">
+                      {activeFile.binary ? '◈' : activeFile.truncated ? '↯' : '◇'}
+                    </span>
+                    <h2>
+                      {activeFile.binary
+                        ? 'Binary file changed'
+                        : activeFile.truncated
+                          ? 'Diff contained for safety'
+                          : 'No textual hunks'}
+                    </h2>
+                    <p>
+                      {activeFile.binary
+                        ? 'Binary content is never rendered or executed.'
+                        : activeFile.truncated
+                          ? 'This file exceeded the per-file patch limit.'
+                          : 'Git recorded metadata-only or empty content changes.'}
+                    </p>
+                  </div>
                 ) : (
-                  activeFile.hunks.map((hunk, index) =>
-                    layout === 'unified' ? (
-                      <UnifiedHunk
-                        key={index}
-                        hunk={hunk}
-                        file={activeFile}
-                        selection={selection}
-                        onSelect={selectLine}
-                      />
-                    ) : (
-                      <SplitHunk
-                        key={index}
-                        hunk={hunk}
-                        file={activeFile}
-                        selection={selection}
-                        onSelect={selectLine}
-                      />
-                    ),
-                  )
+                  activeFile.hunks.map((hunk, hunkIndex) => (
+                    <section
+                      className="hunk"
+                      key={hunkIndex}
+                      aria-label={`Hunk ${hunkIndex + 1} of ${activeFile.hunks.length}`}
+                    >
+                      <div className="hunk-header">{hunk.header}</div>
+                      {hunk.lines.map((line, index) => {
+                        const side: CommentSide = line.kind === 'deletion' ? 'old' : 'new';
+                        const number = side === 'old' ? line.oldLine : line.newLine;
+                        const globalIndex = flatLines.findIndex(
+                          (item) => item.hunk === hunkIndex && item.index === index,
+                        );
+                        const selected =
+                          selection?.side === side &&
+                          selection.path === activeFile.path &&
+                          number !== null &&
+                          number >= selection.startLine &&
+                          number <= selection.endLine;
+                        return (
+                          <button
+                            ref={(node) => {
+                              if (node) lineRefs.current.set(globalIndex, node);
+                              else lineRefs.current.delete(globalIndex);
+                            }}
+                            key={`${line.oldLine}-${line.newLine}-${index}`}
+                            className={`diff-line ${line.kind}${selected ? ' selected' : ''}`}
+                            tabIndex={globalIndex === lineCursor ? 0 : -1}
+                            role="option"
+                            aria-posinset={globalIndex + 1}
+                            aria-setsize={flatLines.length}
+                            aria-selected={selected}
+                            aria-label={spokenLine(line)}
+                            aria-keyshortcuts={ariaKeyShortcuts(
+                              'row-next',
+                              'row-previous',
+                              'next-hunk',
+                              'previous-hunk',
+                              'select-line',
+                              'compose-line',
+                            )}
+                            data-testid={`line-${side}-${number ?? 'none'}`}
+                            onFocus={() => {
+                              setLineCursor(globalIndex);
+                              setFocusRegion('diff');
+                            }}
+                            onClick={(event) => selectLine(line, side, event.shiftKey)}
+                          >
+                            <span className="line-no old" aria-hidden="true">
+                              {line.oldLine ?? ''}
+                            </span>
+                            <span className="line-no new" aria-hidden="true">
+                              {line.newLine ?? ''}
+                            </span>
+                            <span className="line-marker" aria-hidden="true">
+                              {line.kind === 'addition'
+                                ? '+'
+                                : line.kind === 'deletion'
+                                  ? '−'
+                                  : ' '}
+                            </span>
+                            <span className="line-code">
+                              <span className="sr-only">{line.text}</span>
+                              <HighlightedLine text={line.text} path={activeFile.path} />
+                            </span>
+                            <span className="comment-glyph" aria-hidden="true">
+                              +
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </section>
+                  ))
                 )}
               </div>
+              {composer?.scope === 'line' && (
+                <InlineComposer
+                  composer={composer}
+                  selection={selection}
+                  path={activeFile.path}
+                  onChange={(body) => setComposer({ ...composer, body })}
+                  onKeep={keepDraft}
+                  onClose={keepDraft}
+                />
+              )}
             </article>
           ) : (
             <div className="file-empty">
               <span className="empty-icon">✓</span>
-              <h3>No changed files</h3>
+              <h1>No changed files</h1>
               <p>The two revisions have identical trees.</p>
             </div>
           )}
         </main>
-
-        <aside className={`draft-tray ${trayOpen ? 'open' : ''}`} aria-label="Review drafts">
+        <aside
+          className={`draft-tray ${trayOpen ? 'open' : ''}`}
+          aria-label="Review drafts"
+          data-region="inspector"
+        >
           <button
+            ref={trayRef}
             className="tray-tab"
             onClick={() => setTrayOpen((value) => !value)}
             aria-expanded={trayOpen}
@@ -805,12 +1228,8 @@ export function App() {
                   <div>
                     <button
                       onClick={() => {
-                        setComposer({
-                          scope: draft.scope as 'line' | 'file' | 'general',
-                          body: draft.body,
-                          editId: draft.clientId,
-                        });
-                        setActivePath(draft.path ?? activePath);
+                        if (draft.path) chooseFile(draft.path);
+                        openComposer(draft.scope, draft);
                       }}
                     >
                       Edit
@@ -827,24 +1246,25 @@ export function App() {
                   </div>
                 </article>
               ))}
-              {drafts.length === 0 && (
+              {!drafts.length && (
                 <div className="empty-drafts">
                   <span>✦</span>
-                  <p>Select any diff line to start a comment, or add a general note.</p>
+                  <p>Select a diff line, then press C to comment.</p>
                 </div>
               )}
             </div>
             <button
               className="general-button"
-              onClick={() => setComposer({ scope: 'general', body: '' })}
-              disabled={readOnly || manifest.stale}
+              onClick={() => openComposer('general')}
+              disabled={!writable}
+              aria-keyshortcuts={ariaKeyShortcuts('general-comment')}
             >
               + General comment
             </button>
             <div className="submit-stack">
               <button
                 className="primary-button"
-                disabled={drafts.length === 0 || Boolean(busy) || readOnly || manifest.stale}
+                disabled={!drafts.length || Boolean(busy) || !writable}
                 onClick={submit}
               >
                 {busy === 'submit'
@@ -853,101 +1273,150 @@ export function App() {
               </button>
               <button
                 className="approve-button"
-                disabled={Boolean(busy) || readOnly || manifest.stale}
+                disabled={Boolean(busy) || !writable}
                 onClick={approve}
               >
-                ✓ Approve revision
+                ✓ Approve exact revision
               </button>
               <button
                 className="end-button"
-                disabled={Boolean(busy) || readOnly}
+                disabled={Boolean(busy) || Boolean(readOnly)}
                 onClick={endReview}
               >
                 End review
               </button>
             </div>
             <p className="consequence">
-              Approval is bound only to <code>{shortSha(manifest.headSha)}</code>. Feedback
-              submission sends all drafts as one durable event.
+              Approval is bound only to <code>{manifest.headSha}</code>. Feedback sends all drafts
+              as one durable event.
             </p>
           </div>
         </aside>
       </div>
-
-      {composer && (
-        <div
-          className="composer-layer"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target) setComposer(undefined);
-          }}
-        >
-          <section
-            className="composer"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="composer-title"
-          >
-            <div className="composer-title">
-              <div>
-                <span className="eyebrow">Draft comment</span>
-                <h2 id="composer-title">
-                  {composer.scope === 'general'
-                    ? 'Across this review'
-                    : composer.scope === 'file'
-                      ? visiblePath(activeFile?.path ?? '')
-                      : `${selection?.side ?? drafts.find((d) => d.clientId === composer.editId)?.anchor?.side} line ${selection?.startLine ?? drafts.find((d) => d.clientId === composer.editId)?.anchor?.startLine}`}
-                </h2>
-              </div>
-              <button
-                onClick={() => {
-                  setComposer(undefined);
-                  setSelection(undefined);
-                }}
-                aria-label="Close comment composer"
-              >
-                ×
-              </button>
-            </div>
-            <label>
-              <span className="sr-only">Comment</span>
-              <textarea
-                autoFocus
-                maxLength={20000}
-                value={composer.body}
-                onChange={(event) => setComposer({ ...composer, body: event.target.value })}
-                placeholder="What should the author understand or change?"
-              />
-            </label>
-            <div className="composer-footer">
-              <span>
-                {new TextEncoder().encode(composer.body).length.toLocaleString()} / 20,000 bytes
-              </span>
-              <div>
-                <button
-                  className="secondary-button"
-                  onClick={() => {
-                    setComposer(undefined);
-                    setSelection(undefined);
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="primary-button"
-                  disabled={!composer.body.trim()}
-                  onClick={saveDraft}
-                >
-                  Save draft
-                </button>
-              </div>
-            </div>
-          </section>
+      {pendingChord && (
+        <div className="chord-strip" role="status">
+          <kbd>{pendingChord}</kbd> waiting for next key…
         </div>
       )}
-
+      {overlay === 'help' && (
+        <Overlay title="Keyboard help" onClose={closeOverlay}>
+          <div className="overlay-heading">
+            <div>
+              <span className="eyebrow">Current region · {focusRegion}</span>
+              <h2 tabIndex={0}>Keyboard help</h2>
+            </div>
+            <button onClick={closeOverlay} aria-label="Close keyboard help">
+              ×
+            </button>
+          </div>
+          <label className="preference">
+            <input
+              name="character-shortcuts"
+              type="checkbox"
+              checked={characterShortcuts}
+              onChange={(event) => setCharacterShortcuts(event.target.checked)}
+            />{' '}
+            Enable character shortcuts
+          </label>
+          <div className="command-list">
+            {COMMANDS.filter(
+              (command) =>
+                command.scopes.includes('global') ||
+                command.scopes.includes(focusRegion === 'files' ? 'files' : 'diff'),
+            ).map((command) => (
+              <div key={command.id}>
+                <span>{command.label}</span>
+                <span>
+                  {command.bindings.map((binding) => (
+                    <kbd key={binding}>{binding}</kbd>
+                  ))}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Overlay>
+      )}
+      {overlay === 'palette' && (
+        <Overlay title="Command palette" onClose={closeOverlay} initialFocus="input">
+          <div className="overlay-heading">
+            <div>
+              <span className="eyebrow">Every review action</span>
+              <h2>Command palette</h2>
+            </div>
+            <button onClick={closeOverlay} aria-label="Close command palette">
+              ×
+            </button>
+          </div>
+          <label className="palette-search">
+            <span className="sr-only">Search commands</span>
+            <input
+              name="command-search"
+              value={paletteQuery}
+              onChange={(event) => setPaletteQuery(event.target.value)}
+              placeholder="Type a command"
+            />
+          </label>
+          <div className="palette-results">
+            {COMMANDS.filter((command) =>
+              command.label.toLowerCase().includes(paletteQuery.toLowerCase()),
+            ).map((command) => (
+              <button
+                key={command.id}
+                onClick={() => {
+                  closeOverlay();
+                  runCommand(command);
+                }}
+              >
+                <span>
+                  <b>{command.label}</b>
+                  <small>
+                    {command.category}
+                    {command.availability === 'writable' && !writable
+                      ? ' · unavailable for pinned/read-only review'
+                      : ''}
+                  </small>
+                </span>
+                <span>
+                  {command.bindings.map((binding) => (
+                    <kbd key={binding}>{binding}</kbd>
+                  ))}
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="palette-review-actions">
+            <button
+              disabled={!drafts.length || !writable}
+              onClick={() => {
+                closeOverlay();
+                void submit();
+              }}
+            >
+              Submit feedback ({drafts.length})
+            </button>
+            <button
+              disabled={!writable}
+              onClick={() => {
+                closeOverlay();
+                void approve();
+              }}
+            >
+              Approve exact {shortSha(manifest.headSha)}
+            </button>
+            <button
+              disabled={Boolean(readOnly)}
+              onClick={() => {
+                closeOverlay();
+                void endReview();
+              }}
+            >
+              End review
+            </button>
+          </div>
+        </Overlay>
+      )}
       {(notice || (error && manifest)) && (
-        <div className={`toast ${error ? 'error' : ''}`} role="status">
+        <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>
           <span>{error || notice}</span>
           <button
             onClick={() => {

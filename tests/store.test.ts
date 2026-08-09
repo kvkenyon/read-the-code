@@ -129,6 +129,9 @@ describe('durable sessions', () => {
 
     await exec('git', ['-C', fixture.path, 'branch', '-f', 'review-head', fixture.baseSha]);
     expect(await store.manifest(id)).toMatchObject({ stale: true, approvalStale: true });
+    await expect(
+      store.submitFeedback(id, [{ scope: 'general', body: 'Do not attach this to a moved ref.' }]),
+    ).rejects.toMatchObject({ code: 'STALE_REVISION', statusCode: 409 });
     expect(store.sessionId(fixture.path, fixture.baseSha, fixture.baseSha)).not.toBe(id);
     expect((await store.read(id)).events).toEqual([
       expect.objectContaining({ type: 'approval', approvedHeadSha: fixture.headSha }),
