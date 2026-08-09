@@ -61,6 +61,7 @@
     "esbuild": "^0.28.2"
   },
   "dependencies": {
+    "@toon-format/toon": "4.1.1",
     "commander": "^14.0.1",
     "highlight.js": "^11.11.1",
     "parse-diff": "^0.12.0",

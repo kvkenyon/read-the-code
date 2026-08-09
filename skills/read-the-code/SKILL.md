@@ -24,6 +24,18 @@ Use `read-the-code-axi` as the only integration contract. Keep the review local,
 3. If it is missing, ask the local operator to install a trusted package or tarball, or build and link a trusted checkout as documented in the project README. Once the package is published, `npm install --global read-the-code-axi` is the direct install. Do not silently install an unreviewed package.
 4. Use `READ_THE_CODE_STATE_DIR` only when the operator requires isolated state. Choose a private path outside the reviewed repository. Do not inspect its contents.
 
+## Choose the AXI surface
+
+The default surface is compact TOON for safe, human-readable discovery and summaries. It has explicit empty states, aggregates, bounded comment/path previews, and contextual next commands. Use it when no durable parsing is required:
+
+```bash
+read-the-code-axi
+read-the-code-axi status <session>
+read-the-code-axi poll <session> --after <cursor> --timeout 2m
+```
+
+Use explicit `--json` for this skill's checkpointed workflow. Sophon and other durable consumers need the versioned JSON records for exact revision identity, cursors, complete event data, and the local capability returned by `open`. `--full` expands a bounded TOON poll or export when a local operator needs all content; it is not a substitute for JSON validation.
+
 ## Open one exact revision
 
 Resolve and record the repository root and revisions before opening:

@@ -20,6 +20,7 @@ import type {
   ApprovalSubmission,
   ReviewEvent,
   ReviewManifest,
+  ReviewSummary,
   SessionExport,
   SessionRecord,
 } from '../protocol.js';
@@ -370,6 +371,54 @@ export class SessionStore {
       session,
       events: record.events,
       ...(diagnostic ? { diagnostics: { repositoryPath: record.repositoryPath } } : {}),
+    };
+  }
+
+  async recent(limit = 5): Promise<{
+    sessions: Array<{
+      id: string;
+      status: 'open' | 'ended';
+      stale: boolean;
+      baseSha: string;
+      headSha: string;
+      summary: ReviewSummary;
+      updatedAt: string;
+    }>;
+    total: number;
+    open: number;
+    ended: number;
+  }> {
+    const { readdir } = await import('node:fs/promises');
+    const entries = await readdir(this.sessionsDir).catch(() => []);
+    const records = await Promise.all(
+      entries
+        .filter((entry) => entry.endsWith('.json'))
+        .map(async (entry) => {
+          const id = entry.slice(0, -5);
+          try {
+            const manifest = await this.manifest(id);
+            return {
+              id,
+              status: manifest.status,
+              stale: manifest.stale,
+              baseSha: manifest.baseSha,
+              headSha: manifest.headSha,
+              summary: manifest.summary,
+              updatedAt: manifest.updatedAt,
+            };
+          } catch {
+            return undefined;
+          }
+        }),
+    );
+    const valid = records
+      .filter((record): record is NonNullable<typeof record> => Boolean(record))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return {
+      sessions: valid.slice(0, limit),
+      total: valid.length,
+      open: valid.filter((record) => record.status === 'open').length,
+      ended: valid.filter((record) => record.status === 'ended').length,
     };
   }
 
