@@ -30,7 +30,7 @@ export async function createFixtureRepo(root: string): Promise<FixtureRepo> {
   await mkdir(join(root, 'src'), { recursive: true });
   await writeFile(
     join(root, 'src', 'math.ts'),
-    'export function add(a: number, b: number) {\n  return a + b;\n}\n',
+    'export function add(a: number, b: number) {\n  return a + b;\n}\n\nexport const one = 1;\nexport const two = 2;\nexport const three = 3;\nexport const four = 4;\nexport const five = 5;\nexport const six = 6;\nexport const seven = 7;\nexport const eight = 8;\nexport const nine = 9;\nexport const ten = 10;\nexport const eleven = 11;\nexport const twelve = 12;\nexport const thirteen = 13;\nexport const fourteen = 14;\nexport const fifteen = 15;\nexport const sixteen = 16;\nexport const seventeen = 17;\nexport const eighteen = 18;\nexport const nineteen = 19;\nexport const twenty = 20;\n',
   );
   await writeFile(join(root, 'delete-me.txt'), 'this file will be removed\n');
   await writeFile(join(root, 'rename-me.md'), '# Before\n\nRename this document.\n');
@@ -41,7 +41,7 @@ export async function createFixtureRepo(root: string): Promise<FixtureRepo> {
 
   await writeFile(
     join(root, 'src', 'math.ts'),
-    'export function add(a: number, b: number) {\n  const total = a + b;\n  return total;\n}\n\nexport const answer = 42;\n',
+    'export function add(a: number, b: number) {\n  const total = a + b;\n  return total;\n}\n\nexport const answer = 42;\nexport const one = 1;\nexport const two = 2;\nexport const three = 3;\nexport const four = 4;\nexport const five = 5;\nexport const six = 6;\nexport const seven = 7;\nexport const eight = 8;\nexport const nine = 9;\nexport const ten = 10;\nexport const eleven = 11;\nexport const twelve = 12;\nexport const thirteen = 13;\nexport const fourteen = 14;\nexport const fifteen = 15;\nexport const sixteen = 16;\nexport const seventeen = 17;\nexport const eighteen = 18;\nexport const nineteen = 19;\nexport const twenty = 80;\n',
   );
   await writeFile(join(root, 'added.py'), 'def greet(name):\n    return f"Hello, {name}!"\n');
   await git(root, 'rm', '-q', 'delete-me.txt');

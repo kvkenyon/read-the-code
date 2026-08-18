@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
+import { constants } from 'node:fs';
+import { chmod, open, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { encode } from '@toon-format/toon';
 import { Command } from 'commander';
+import packageJson from '../package.json' with { type: 'json' };
 import { ensureServer, sessionFetch } from './core/client.js';
 import { AppError, errorMessage } from './core/errors.js';
 import { buildReview, resolveCommit, resolveRepository } from './core/git.js';
@@ -121,11 +124,56 @@ function launchBrowser(url: string): void {
   child.unref();
 }
 
+function inside(root: string, target: string): boolean {
+  const path = relative(root, target);
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
+}
+
+async function armWakeFile(path: string, repository: string): Promise<string> {
+  const absolute = resolve(path);
+  if (inside(repository, absolute)) {
+    throw new AppError(
+      'Wake file must stay outside the reviewed repository',
+      'INVALID_WAKE_FILE',
+      2,
+      400,
+    );
+  }
+  let canonicalParent: string;
+  try {
+    canonicalParent = await realpath(dirname(absolute));
+  } catch {
+    throw new AppError(
+      'Wake file parent directory must already exist',
+      'INVALID_WAKE_FILE',
+      2,
+      400,
+    );
+  }
+  const canonical = join(canonicalParent, basename(absolute));
+  if (inside(repository, canonical)) {
+    throw new AppError(
+      'Wake file must stay outside the reviewed repository',
+      'INVALID_WAKE_FILE',
+      2,
+      400,
+    );
+  }
+  const handle = await open(
+    canonical,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  await handle.close();
+  await chmod(canonical, 0o600);
+  return canonical;
+}
+
 program
   .name('read-the-code-axi')
   .description('Open an exact local Git change set for browser review')
   .option('--json', 'emit versioned JSON for the home view')
-  .version('0.1.0');
+  .version(packageJson.version);
 
 program.configureOutput({ writeErr: () => undefined });
 
@@ -160,6 +208,7 @@ program
   .requiredOption('--base <ref>', 'base commit-ish')
   .requiredOption('--head <ref>', 'head commit-ish')
   .option('--no-browser', 'do not launch the default browser')
+  .option('--wake-file <path>', 'append secret-free JSONL when a review event is submitted')
   .option('--json', 'emit versioned JSON')
   .action(
     async (options: {
@@ -167,6 +216,7 @@ program
       base: string;
       head: string;
       browser: boolean;
+      wakeFile?: string;
       json?: boolean;
     }) => {
       const json = process.argv.includes('--json');
@@ -177,6 +227,9 @@ program
       ]);
       const store = new SessionStore();
       const id = store.sessionId(repository.path, baseSha, headSha);
+      const wakeFile = options.wakeFile
+        ? await armWakeFile(options.wakeFile, repository.path)
+        : undefined;
       let review: Awaited<ReturnType<typeof buildReview>>;
       if (await store.exists(id)) {
         const existing = await store.read(id);
@@ -193,6 +246,7 @@ program
         headRef: options.head,
         baseSha,
         headSha,
+        wakeFile,
         ...review,
       });
       const registry = await ensureServer(store, process.argv[1]);
@@ -205,6 +259,7 @@ program
         headSha,
         browserUrl,
         resumed,
+        wakeFileArmed: Boolean(wakeFile),
         status: 'open',
       };
       if (json) {
@@ -218,9 +273,12 @@ program
           revision: `${shortSha(baseSha)} → ${shortSha(headSha)}`,
           changes: `${review.summary.files} files; +${review.summary.additions}/-${review.summary.deletions}`,
           browser: options.browser ? 'launched locally' : 'not launched (--no-browser)',
+          wakeDelivery: wakeFile ? 'armed with secret-free JSONL events' : 'not armed',
           ...help([
             `Run \`read-the-code-axi status ${id}\` to inspect this review`,
-            `Run \`read-the-code-axi poll ${id} --after 0 --timeout 2m\` to wait for feedback`,
+            wakeFile
+              ? `Watch the armed wake file, then run \`read-the-code-axi poll ${id} --after 0 --json\` for durable events`
+              : `Run \`read-the-code-axi poll ${id} --after 0 --timeout 2m\` to wait for feedback`,
           ]),
         },
         false,

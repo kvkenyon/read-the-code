@@ -10,6 +10,7 @@ const root = await mkdtemp(join(process.cwd(), '.pack-smoke-'));
 let binary;
 let state;
 let sessionId;
+let wakeFile;
 
 async function runCli(...args) {
   return (
@@ -68,6 +69,7 @@ try {
     throw new Error(`Unexpected packed CLI version: ${stdout.trim()}`);
   }
   state = join(root, 'state');
+  wakeFile = join(root, 'instantiator-wake.jsonl');
   const home = parseToon(await runCli(), 'no-argument home view');
   if (
     home.description === undefined ||
@@ -97,6 +99,24 @@ try {
   ).stdout;
   const fixture = JSON.parse(fixtureOutput);
   await exec('git', ['-C', fixture.repository, 'branch', 'review-head', fixture.head]);
+  const repositoryWake = await runCliFailure(
+    'open',
+    '--repo',
+    fixture.repository,
+    '--base',
+    fixture.base,
+    '--head',
+    'review-head',
+    '--wake-file',
+    join(fixture.repository, 'wake.jsonl'),
+  );
+  const repositoryWakeError = parseToon(
+    repositoryWake.stdout.trim(),
+    'reviewed-repository wake error',
+  );
+  if (repositoryWake.code !== 2 || repositoryWakeError.error?.code !== 'INVALID_WAKE_FILE') {
+    throw new Error('Packed open allowed its wake file to modify the reviewed repository');
+  }
   const toonOpen = parseToon(
     await runCli(
       'open',
@@ -124,6 +144,8 @@ try {
       '--head',
       'review-head',
       '--no-browser',
+      '--wake-file',
+      wakeFile,
       '--json',
     ),
   );
@@ -131,7 +153,8 @@ try {
   if (
     opened.schemaVersion !== 1 ||
     opened.baseSha !== fixture.base ||
-    opened.headSha !== fixture.head
+    opened.headSha !== fixture.head ||
+    !opened.wakeFileArmed
   ) {
     throw new Error('Packed open did not preserve the exact requested revision');
   }
@@ -179,6 +202,17 @@ try {
     }),
   });
   if (feedbackResponse.status !== 201) throw new Error('Packed review rejected feedback');
+  const wakeText = await readFile(wakeFile, 'utf8');
+  const wake = JSON.parse(wakeText.trim().split('\n').at(-1));
+  if (
+    wake.sessionId !== sessionId ||
+    wake.sequence !== 1 ||
+    wake.type !== 'feedback' ||
+    wakeText.includes(capability) ||
+    wakeText.includes(opened.browserUrl)
+  ) {
+    throw new Error('Packed review did not return a secret-free event to its instantiator');
+  }
   const toonFeedback = parseToon(
     await runCli('poll', sessionId, '--after', '0', '--timeout', '1s'),
     'default feedback poll',

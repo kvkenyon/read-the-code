@@ -18,7 +18,14 @@ export const COMMANDS: readonly ReviewCommand[] = [
     id: 'palette',
     label: 'Command palette',
     category: 'View',
-    bindings: [':', 'Mod+K'],
+    bindings: ['Mod+K'],
+    scopes: ['global'],
+  },
+  {
+    id: 'toggle-sidebar',
+    label: 'Toggle changed files sidebar',
+    category: 'View',
+    bindings: ['Mod+B'],
     scopes: ['global'],
   },
   {
@@ -78,6 +85,16 @@ export const COMMANDS: readonly ReviewCommand[] = [
     category: 'Review',
     bindings: ['m'],
     scopes: ['global'],
+    availability: 'active-file',
+    characterShortcut: true,
+  },
+  {
+    id: 'next-unreviewed',
+    label: 'Next unreviewed file',
+    category: 'Review',
+    bindings: [']'],
+    scopes: ['global'],
+    focusResult: 'diff',
     availability: 'active-file',
     characterShortcut: true,
   },
@@ -196,7 +213,8 @@ export const COMMANDS: readonly ReviewCommand[] = [
 ];
 
 export function keyStroke(event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey'>) {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') return 'Mod+K';
+  if ((event.metaKey || event.ctrlKey) && event.key.length === 1)
+    return `Mod+${event.key.toUpperCase()}`;
   if (event.shiftKey && event.key.length === 1) return `Shift+${event.key.toUpperCase()}`;
   return event.key;
 }
@@ -210,7 +228,11 @@ export function commandById(id: string): ReviewCommand {
 export function ariaKeyShortcuts(...ids: string[]): string {
   return ids
     .flatMap((id) => commandById(id).bindings)
-    .flatMap((binding) => (binding === 'Mod+K' ? ['Meta+K', 'Control+K'] : [binding]))
+    .flatMap((binding) =>
+      binding.startsWith('Mod+')
+        ? [`Meta+${binding.slice(4)}`, `Control+${binding.slice(4)}`]
+        : [binding],
+    )
     .join(' ');
 }
 

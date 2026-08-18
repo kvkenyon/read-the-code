@@ -62,6 +62,9 @@ try {
       .getByPlaceholder('What should the author understand or change?')
       .fill('Should rounding happen only at the currency formatting boundary?');
     await page.getByRole('button', { name: 'Save draft' }).click();
+    await page.getByRole('button', { name: 'Mark reviewed' }).click();
+    await page.getByRole('button', { name: /Expand .* hidden .* before/ }).click();
+    await page.getByRole('tab', { name: /Guide/ }).click();
     await page.screenshot({ path: output, animations: 'disabled' });
   } finally {
     await browser.close();

@@ -16,13 +16,18 @@ The normal CLI surface is compact TOON intended for agent-readable summaries. It
   "headSha": "40-hex-commit-id",
   "browserUrl": "http://127.0.0.1:49152/#/review/<session>/<capability>",
   "resumed": false,
+  "wakeFileArmed": true,
   "status": "open"
 }
 ```
 
+`open --wake-file <path>` arms local instantiator delivery. The path is stored only in private session state and is omitted from normal output and exports. Each submission appends a mode-`0600` JSONL `ReviewWakeEvent` containing `schemaVersion`, `sessionId`, `sequence`, `type`, and the corresponding secret-free durable `event`. It never contains the browser URL or capability. Wake delivery tells an instantiator to call `poll`; it does not consume or acknowledge the append-only event.
+
 `status --json` omits capabilities and paths. It includes revision SHAs, change summary, `stale`, `approvalStale`, event counts, the latest sequence, and timestamps.
 
 The browser manifest includes repository display name, original ref labels, resolved SHAs, lifecycle/stale state, summary, and files. A file contains `path`, optional `oldPath`, status, counts, binary/truncated flags, and hunks. Each diff line contains its kind, nullable old/new number, plain text, and contextual hash.
+
+Text files may also carry exact-tree old/new line counts so the UI can identify collapsed ranges. `GET .../context` accepts only a path already in the review, a real hunk index, `position=before|after`, and a bounded `lines` count from 1 through 200. It returns `ContextResult` with the total hidden count and old/new numbered context lines read from the session's pinned base/head blobs. It cannot name an arbitrary revision or filesystem path.
 
 ## Comment input
 
@@ -94,13 +99,14 @@ A timeout is successful and returns an empty event list with `timedOut: true` an
 
 The UI uses these loopback-only routes with `Authorization: Bearer <session capability>`:
 
-| Method | Route                                            | Result                     |
-| ------ | ------------------------------------------------ | -------------------------- |
-| `GET`  | `/api/v1/sessions/:id`                           | Review manifest            |
-| `GET`  | `/api/v1/sessions/:id/events?after=N&timeout=MS` | Long-poll result           |
-| `POST` | `/api/v1/sessions/:id/feedback`                  | Created feedback event     |
-| `POST` | `/api/v1/sessions/:id/approval`                  | Created exact-SHA approval |
-| `POST` | `/api/v1/sessions/:id/end`                       | Idempotent end event       |
+| Method | Route                                                                 | Result                     |
+| ------ | --------------------------------------------------------------------- | -------------------------- |
+| `GET`  | `/api/v1/sessions/:id`                                                | Review manifest            |
+| `GET`  | `/api/v1/sessions/:id/events?after=N&timeout=MS`                      | Long-poll result           |
+| `GET`  | `/api/v1/sessions/:id/context?path=P&hunk=N&position=before&lines=20` | Exact-tree hunk context    |
+| `POST` | `/api/v1/sessions/:id/feedback`                                       | Created feedback event     |
+| `POST` | `/api/v1/sessions/:id/approval`                                       | Created exact-SHA approval |
+| `POST` | `/api/v1/sessions/:id/end`                                            | Idempotent end event       |
 
 Feedback and approval return `STALE_REVISION` with HTTP 409 if the originally requested symbolic head no longer resolves to the session's exact head SHA. Existing events remain readable. The Phase 1 UI and hardening work do not change any successful JSON, TOON, event, or CLI shape; future index, per-file diff, and workspace routes are planned as additive surfaces.
 

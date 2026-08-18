@@ -4,7 +4,16 @@ import { basename } from 'node:path';
 import { promisify } from 'node:util';
 import { realpath } from 'node:fs/promises';
 import parseDiff from 'parse-diff';
-import type { ChangeStatus, DiffHunk, DiffLine, ReviewFile, ReviewSummary } from '../protocol.js';
+import type {
+  ChangeStatus,
+  ContextLine,
+  ContextPosition,
+  DiffHunk,
+  DiffLine,
+  ReviewFile,
+  ReviewSummary,
+  SessionRecord,
+} from '../protocol.js';
 import { AppError } from './errors.js';
 import { LIMITS } from './limits.js';
 
@@ -149,6 +158,21 @@ async function blobSize(repo: string, sha: string, path: string | undefined): Pr
   }
 }
 
+async function blobLineCount(repo: string, sha: string, path: string | undefined): Promise<number> {
+  if (!path) return 0;
+  try {
+    const { stdout } = await git(
+      repo,
+      ['cat-file', 'blob', `${sha}:${path}`],
+      LIMITS.maxPatchBytesPerFile + 1,
+    );
+    if (!stdout) return 0;
+    return stdout.endsWith('\n') ? stdout.split('\n').length - 1 : stdout.split('\n').length;
+  } catch {
+    return 0;
+  }
+}
+
 async function fileStats(
   repo: string,
   baseSha: string,
@@ -247,6 +271,10 @@ export async function buildReview(
       throw new AppError('Review patch exceeds the 8 MB safety limit', 'REVIEW_TOO_LARGE', 4, 413);
     }
     const normalized = normalizePatch(change.path, patch);
+    const [oldLineCount, newLineCount] = await Promise.all([
+      blobLineCount(repo, baseSha, change.oldPath ?? change.path),
+      blobLineCount(repo, headSha, change.path),
+    ]);
     files.push({
       ...change,
       status: change.status,
@@ -254,6 +282,8 @@ export async function buildReview(
       deletions: stats.deletions,
       binary: false,
       truncated,
+      oldLineCount,
+      newLineCount,
       hunks: normalized.hunks,
     });
   }
@@ -277,4 +307,78 @@ export async function isRevisionStale(
   } catch {
     return true;
   }
+}
+
+async function blobLines(repo: string, sha: string, path: string | undefined): Promise<string[]> {
+  if (!path) return [];
+  const { stdout } = await git(
+    repo,
+    ['cat-file', 'blob', `${sha}:${path}`],
+    LIMITS.maxPatchBytesPerFile + 1,
+  );
+  if (!stdout) return [];
+  const lines = stdout.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
+export async function hunkContext(
+  record: SessionRecord,
+  path: string,
+  hunkIndex: number,
+  position: ContextPosition,
+  limit: number,
+): Promise<{ total: number; lines: ContextLine[] }> {
+  const file = record.files.find((candidate) => candidate.path === path);
+  const hunk = file?.hunks[hunkIndex];
+  if (!file || !hunk || file.binary || file.truncated) {
+    throw new AppError('Context target is not a rendered review hunk', 'INVALID_CONTEXT', 2, 400);
+  }
+  const [oldLines, newLines] = await Promise.all([
+    blobLines(record.repositoryPath, record.baseSha, file.oldPath ?? file.path).catch(() => []),
+    blobLines(record.repositoryPath, record.headSha, file.path).catch(() => []),
+  ]);
+  const previous = file.hunks[hunkIndex - 1];
+  const next = file.hunks[hunkIndex + 1];
+  const oldStart =
+    position === 'before'
+      ? previous
+        ? previous.oldStart + previous.oldLines
+        : 1
+      : hunk.oldStart + hunk.oldLines;
+  const newStart =
+    position === 'before'
+      ? previous
+        ? previous.newStart + previous.newLines
+        : 1
+      : hunk.newStart + hunk.newLines;
+  const oldEnd =
+    position === 'before' ? hunk.oldStart - 1 : next ? next.oldStart - 1 : oldLines.length;
+  const newEnd =
+    position === 'before' ? hunk.newStart - 1 : next ? next.newStart - 1 : newLines.length;
+  const oldTotal = Math.max(0, oldEnd - oldStart + 1);
+  const newTotal = Math.max(0, newEnd - newStart + 1);
+  const total = Math.max(oldTotal, newTotal);
+  const count = Math.min(limit, total);
+  const offset = position === 'before' ? total - count : 0;
+  const alignOld = position === 'before' ? oldTotal - total : 0;
+  const alignNew = position === 'before' ? newTotal - total : 0;
+  const lines = Array.from({ length: count }, (_, index): ContextLine => {
+    const logical = offset + index;
+    const oldOffset = logical + alignOld;
+    const newOffset = logical + alignNew;
+    const oldLine = oldOffset >= 0 && oldOffset < oldTotal ? oldStart + oldOffset : null;
+    const newLine = newOffset >= 0 && newOffset < newTotal ? newStart + newOffset : null;
+    return {
+      oldLine,
+      newLine,
+      text:
+        newLine !== null
+          ? (newLines[newLine - 1] ?? '')
+          : oldLine !== null
+            ? (oldLines[oldLine - 1] ?? '')
+            : '',
+    };
+  });
+  return { total, lines };
 }

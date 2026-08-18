@@ -1,6 +1,6 @@
 {
   "name": "read-the-code-axi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first browser code review for exact Git revisions",
   "type": "module",
   "bin": {

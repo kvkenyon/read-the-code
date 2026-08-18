@@ -11,11 +11,14 @@ import xml from 'highlight.js/lib/languages/xml';
 import type {
   CommentDraft,
   CommentSide,
+  ContextPosition,
+  ContextResult,
   DiffLine,
   ReviewEvent,
   ReviewFile,
   ReviewManifest,
 } from '../protocol';
+import { buildGuide } from './guide';
 import {
   ariaKeyShortcuts,
   COMMANDS,
@@ -64,6 +67,10 @@ interface FlatLine {
   side: CommentSide;
   hunk: number;
   index: number;
+}
+interface GuideJump {
+  path: string;
+  hunk: number;
 }
 type Theme = 'light' | 'dark' | 'system';
 
@@ -142,6 +149,86 @@ function spokenLine(line: DiffLine): string {
   const oldNumber = line.oldLine === null ? 'no old line' : `old line ${line.oldLine}`;
   const newNumber = line.newLine === null ? 'no new line' : `new line ${line.newLine}`;
   return `${kind}, ${oldNumber}, ${newNumber}: ${line.text || 'blank line'}`;
+}
+
+function hiddenContextCount(
+  file: ReviewFile,
+  hunkIndex: number,
+  position: ContextPosition,
+): number {
+  const hunk = file.hunks[hunkIndex];
+  if (!hunk) return 0;
+  const adjacent = position === 'before' ? file.hunks[hunkIndex - 1] : file.hunks[hunkIndex + 1];
+  const oldStart =
+    position === 'before'
+      ? adjacent
+        ? adjacent.oldStart + adjacent.oldLines
+        : 1
+      : hunk.oldStart + hunk.oldLines;
+  const newStart =
+    position === 'before'
+      ? adjacent
+        ? adjacent.newStart + adjacent.newLines
+        : 1
+      : hunk.newStart + hunk.newLines;
+  const oldEnd =
+    position === 'before'
+      ? hunk.oldStart - 1
+      : adjacent
+        ? adjacent.oldStart - 1
+        : (file.oldLineCount ?? 0);
+  const newEnd =
+    position === 'before'
+      ? hunk.newStart - 1
+      : adjacent
+        ? adjacent.newStart - 1
+        : (file.newLineCount ?? 0);
+  return Math.max(0, oldEnd - oldStart + 1, newEnd - newStart + 1);
+}
+
+function ContextGap({
+  file,
+  hunk,
+  position,
+  result,
+  busy,
+  onExpand,
+}: {
+  file: ReviewFile;
+  hunk: number;
+  position: ContextPosition;
+  result?: ContextResult;
+  busy: boolean;
+  onExpand: () => void;
+}) {
+  const total = hiddenContextCount(file, hunk, position);
+  if (!total) return null;
+  const remaining = total - (result?.lines.length ?? 0);
+  const control = remaining > 0 && (
+    <button className="context-expand" disabled={busy} onClick={onExpand}>
+      {busy
+        ? 'Reading exact tree…'
+        : `Expand ${Math.min(20, remaining)} of ${remaining} hidden ${remaining === 1 ? 'line' : 'lines'} ${position}`}
+    </button>
+  );
+  const lines = result?.lines.map((line) => (
+    <div className="context-line" key={`${line.oldLine ?? 'x'}:${line.newLine ?? 'x'}`}>
+      <span className="line-no old">{line.oldLine ?? ''}</span>
+      <span className="line-no new">{line.newLine ?? ''}</span>
+      <span className="line-marker"> </span>
+      <span className="line-code">
+        <HighlightedLine text={line.text} path={file.path} />
+      </span>
+      <span />
+    </div>
+  ));
+  return (
+    <div className={`context-gap ${position}`}>
+      {position === 'before' && control}
+      {lines}
+      {position === 'after' && control}
+    </div>
+  );
 }
 
 function Overlay({
@@ -284,7 +371,12 @@ export function App() {
   const [selection, setSelection] = useState<Selection>();
   const [composer, setComposer] = useState<Composer>();
   const [trayOpen, setTrayOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 720);
+  const [sidebarMode, setSidebarMode] = useState<'files' | 'guide'>('files');
+  const [guideIndex, setGuideIndex] = useState(0);
+  const [guideJump, setGuideJump] = useState<GuideJump>();
+  const [expandedContext, setExpandedContext] = useState(new Map<string, ContextResult>());
+  const [contextBusy, setContextBusy] = useState('');
   const [overlay, setOverlay] = useState<'help' | 'palette'>();
   const [paletteQuery, setPaletteQuery] = useState('');
   const [theme, setTheme] = useState<Theme>(
@@ -305,6 +397,8 @@ export function App() {
   const fileRefs = useRef(new Map<number, HTMLButtonElement>());
   const lineRefs = useRef(new Map<number, HTMLButtonElement>());
   const trayRef = useRef<HTMLButtonElement>(null);
+  const diffRef = useRef<HTMLElement>(null);
+  const guideRefs = useRef(new Map<number, HTMLButtonElement>());
   const overlayTrigger = useRef<HTMLElement | null>(null);
 
   const refresh = useCallback(async () => {
@@ -366,6 +460,14 @@ export function App() {
     manifest?.files.filter((file) =>
       visiblePath(file.path).toLowerCase().includes(query.toLowerCase()),
     ) ?? [];
+  const guide = useMemo(() => (manifest ? buildGuide(manifest) : []), [manifest]);
+  const guideStops = useMemo(
+    () =>
+      guide.flatMap((chapter, chapterIndex) =>
+        chapter.stops.map((stop) => ({ ...stop, chapterIndex, chapterTitle: chapter.title })),
+      ),
+    [guide],
+  );
   const flatLines = useMemo<FlatLine[]>(
     () =>
       activeFile?.hunks.flatMap((hunk, hunkIndex) =>
@@ -401,6 +503,11 @@ export function App() {
     window.requestAnimationFrame(() => fileRefs.current.get(next)?.focus());
   };
   const focusLine = (index: number, extend = false) => {
+    if (!flatLines.length) {
+      diffRef.current?.focus();
+      setFocusRegion('diff');
+      return;
+    }
     const next = Math.max(0, Math.min(flatLines.length - 1, index));
     setLineCursor(next);
     const item = flatLines[next];
@@ -417,12 +524,25 @@ export function App() {
     setSelection(undefined);
     setComposer(undefined);
     setLineCursor(0);
-    setSidebarOpen(false);
+    if (window.innerWidth < 720) setSidebarOpen(false);
     document.querySelector('.review-main')?.scrollTo({ top: 0 });
     if (focusDiff) window.requestAnimationFrame(() => lineRefs.current.get(0)?.focus());
   }, []);
 
-  const selectLine = (line: DiffLine, side: CommentSide, extend: boolean): void => {
+  useEffect(() => {
+    if (!guideJump || activeFile?.path !== guideJump.path) return;
+    const index = flatLines.findIndex((line) => line.hunk === guideJump.hunk);
+    if (index >= 0) {
+      setLineCursor(index);
+      window.requestAnimationFrame(() => {
+        lineRefs.current.get(index)?.focus();
+        lineRefs.current.get(index)?.scrollIntoView({ block: 'nearest' });
+      });
+    } else diffRef.current?.focus();
+    setGuideJump(undefined);
+  }, [activeFile, flatLines, guideJump]);
+
+  function selectLine(line: DiffLine, side: CommentSide, extend: boolean): void {
     const lineNumber = side === 'old' ? line.oldLine : line.newLine;
     if (!activeFile || lineNumber === null) return;
     if (extend && selection?.path === activeFile.path && selection.side === side) {
@@ -452,7 +572,7 @@ export function App() {
         endContextHash: line.contextHash,
       });
     announce(`Selected ${side} line ${lineNumber}. Press C to comment or V then J or K to extend.`);
-  };
+  }
 
   const openComposer = (scope: Composer['scope'], edit?: LocalDraft) => {
     if (!writable) return;
@@ -513,14 +633,60 @@ export function App() {
     });
   };
 
-  const toggleReviewed = () => {
-    if (!activeFile || !manifest) return;
+  const toggleReviewed = (path = activeFile?.path) => {
+    if (!path || !manifest) return;
     const next = new Set(reviewed);
-    if (next.has(activeFile.path)) next.delete(activeFile.path);
-    else next.add(activeFile.path);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
     setReviewed(next);
     localStorage.setItem(`read-the-code:${manifest.sessionId}:reviewed`, JSON.stringify([...next]));
     announce(`${next.size} of ${manifest.files.length} files reviewed.`);
+  };
+
+  const nextUnreviewed = () => {
+    if (!manifest?.files.length) return;
+    const activeIndex = manifest.files.findIndex((file) => file.path === activePath);
+    const ordered = [
+      ...manifest.files.slice(activeIndex + 1),
+      ...manifest.files.slice(0, activeIndex + 1),
+    ];
+    const next = ordered.find((file) => !reviewed.has(file.path));
+    if (next) chooseFile(next.path, true);
+    else announce('Every changed file is marked reviewed.');
+  };
+
+  const goGuideStop = (index: number) => {
+    const next = Math.max(0, Math.min(guideStops.length - 1, index));
+    const stop = guideStops[next];
+    if (!stop) return;
+    setGuideIndex(next);
+    setGuideJump({ path: stop.path, hunk: stop.hunk });
+    chooseFile(stop.path);
+  };
+
+  const returnToGuide = () => {
+    setSidebarMode('guide');
+    setSidebarOpen(true);
+    window.requestAnimationFrame(() => guideRefs.current.get(guideIndex)?.focus());
+  };
+
+  const expandContext = async (file: ReviewFile, hunk: number, position: ContextPosition) => {
+    if (!creds) return;
+    const key = `${file.path}:${hunk}:${position}`;
+    const current = expandedContext.get(key)?.lines.length ?? 0;
+    const lines = Math.min(200, Math.max(20, current + 20));
+    setContextBusy(key);
+    try {
+      const result = await api<ContextResult>(
+        creds,
+        `/context?path=${encodeURIComponent(file.path)}&hunk=${hunk}&position=${position}&lines=${lines}`,
+      );
+      setExpandedContext((values) => new Map(values).set(key, result));
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setContextBusy('');
+    }
   };
 
   const submit = async () => {
@@ -606,6 +772,16 @@ export function App() {
       case 'palette':
         openOverlay('palette');
         break;
+      case 'toggle-sidebar':
+        setSidebarOpen((open) => {
+          const next = !open;
+          window.requestAnimationFrame(() => {
+            if (next) focusFile(fileCursor);
+            else focusLine(lineCursor);
+          });
+          return next;
+        });
+        break;
       case 'quick-find':
         setSidebarOpen(true);
         window.requestAnimationFrame(() => searchRef.current?.focus());
@@ -630,6 +806,9 @@ export function App() {
         break;
       case 'toggle-reviewed':
         toggleReviewed();
+        break;
+      case 'next-unreviewed':
+        nextUnreviewed();
         break;
       case 'file-comment':
         openComposer('file');
@@ -664,8 +843,8 @@ export function App() {
       }
       case 'previous-hunk': {
         const current = flatLines[lineCursor]?.hunk ?? 0;
-        const reversed = flatLines.map((item) => item.hunk).lastIndexOf(current - 1);
-        if (reversed >= 0) focusLine(reversed);
+        const previous = flatLines.findIndex((item) => item.hunk === current - 1);
+        if (previous >= 0) focusLine(previous);
         break;
       }
       case 'select-line': {
@@ -862,16 +1041,16 @@ export function App() {
           </span>
         </div>
       )}
-      <div className="workspace">
+      <div className={`workspace ${sidebarOpen ? '' : 'sidebar-hidden'}`}>
         <aside
-          className={`file-sidebar ${sidebarOpen ? 'open' : ''}`}
+          className={`file-sidebar ${sidebarOpen ? 'open' : 'closed'}`}
           aria-label="Changed files"
           data-region="files"
         >
           <div className="sidebar-heading">
             <div>
               <span className="eyebrow">Change set</span>
-              <h2>Files</h2>
+              <h2>{sidebarMode === 'files' ? 'Files' : 'Guide'}</h2>
             </div>
             <button
               className="close-sidebar"
@@ -881,103 +1060,171 @@ export function App() {
               ×
             </button>
           </div>
-          <label className="search-box">
-            <span aria-hidden="true">⌕</span>
-            <span className="sr-only">Find changed files</span>
-            <input
-              name="file-search"
-              ref={searchRef}
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setFileCursor(0);
-              }}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing) return;
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  if (query) setQuery('');
-                  else {
-                    setSidebarOpen(false);
-                    fileRefs.current.get(fileCursor)?.focus();
-                  }
-                }
-                if (event.key === 'ArrowDown') {
-                  event.preventDefault();
-                  focusFile(0);
-                }
-              }}
-              placeholder="Find files  /"
-              aria-keyshortcuts={ariaKeyShortcuts('quick-find')}
-            />
-            {query && (
-              <button onClick={() => setQuery('')} aria-label="Clear file search">
-                ×
-              </button>
-            )}
-          </label>
-          <div
-            className="review-progress"
-            aria-label={`${reviewed.size} of ${manifest.files.length} files reviewed`}
-          >
-            <div>
-              <span>Reviewed</span>
-              <b>
-                {reviewed.size}/{manifest.files.length}
-              </b>
-            </div>
-            <div className="progress-track">
-              <span
-                style={{
-                  width: `${manifest.files.length ? (reviewed.size / manifest.files.length) * 100 : 0}%`,
-                }}
-              />
-            </div>
+          <div className="sidebar-tabs" role="tablist" aria-label="Review navigation">
+            <button
+              role="tab"
+              aria-selected={sidebarMode === 'files'}
+              onClick={() => setSidebarMode('files')}
+            >
+              Files
+            </button>
+            <button
+              role="tab"
+              aria-selected={sidebarMode === 'guide'}
+              onClick={() => setSidebarMode('guide')}
+            >
+              Guide <span>{guide.length}</span>
+            </button>
           </div>
-          <nav className="file-list" aria-label="Changed file list">
-            {filteredFiles.map((file, index) => (
-              <button
-                ref={(node) => {
-                  if (node) fileRefs.current.set(index, node);
-                  else fileRefs.current.delete(index);
-                }}
-                tabIndex={index === fileCursor ? 0 : -1}
-                key={file.path}
-                className={file.path === activePath ? 'active' : ''}
-                onFocus={() => setFileCursor(index)}
-                onClick={() => chooseFile(file.path, true)}
-                aria-current={file.path === activePath ? 'page' : undefined}
-                aria-label={`${file.status} ${visiblePath(file.path)}${reviewed.has(file.path) ? ', reviewed' : ', not reviewed'}${commentCounts.has(file.path) ? `, ${commentCounts.get(file.path)} comments` : ''}`}
-              >
-                <span className={`status-dot ${file.status}`} aria-hidden="true">
-                  {statusLabel(file)}
-                </span>
-                <span className="file-name">{visiblePath(file.path)}</span>
-                {commentCounts.has(file.path) && (
-                  <span className="count-badge">{commentCounts.get(file.path)}</span>
+          {sidebarMode === 'files' ? (
+            <>
+              <label className="search-box">
+                <span aria-hidden="true">⌕</span>
+                <span className="sr-only">Find changed files</span>
+                <input
+                  name="file-search"
+                  ref={searchRef}
+                  value={query}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    setFileCursor(0);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.nativeEvent.isComposing) return;
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      if (query) setQuery('');
+                      else {
+                        setSidebarOpen(false);
+                        fileRefs.current.get(fileCursor)?.focus();
+                      }
+                    }
+                    if (event.key === 'ArrowDown') {
+                      event.preventDefault();
+                      focusFile(0);
+                    }
+                  }}
+                  placeholder="Find files  /"
+                  aria-keyshortcuts={ariaKeyShortcuts('quick-find')}
+                />
+                {query && (
+                  <button onClick={() => setQuery('')} aria-label="Clear file search">
+                    ×
+                  </button>
                 )}
-                <span
-                  className={`review-check ${reviewed.has(file.path) ? 'done' : ''}`}
-                  aria-hidden="true"
-                >
-                  {reviewed.has(file.path) ? '✓' : '○'}
+              </label>
+              <div
+                className="review-progress"
+                aria-label={`${reviewed.size} of ${manifest.files.length} files reviewed`}
+              >
+                <div>
+                  <span>Reviewed</span>
+                  <b>
+                    {reviewed.size}/{manifest.files.length}
+                  </b>
+                </div>
+                <div className="progress-track">
+                  <span
+                    style={{
+                      width: `${manifest.files.length ? (reviewed.size / manifest.files.length) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+              </div>
+              <nav className="file-list" aria-label="Changed file list">
+                {filteredFiles.map((file, index) => (
+                  <div
+                    key={file.path}
+                    className={`file-row ${file.path === activePath ? 'active' : ''} ${reviewed.has(file.path) ? 'reviewed' : ''}`}
+                  >
+                    <button
+                      ref={(node) => {
+                        if (node) fileRefs.current.set(index, node);
+                        else fileRefs.current.delete(index);
+                      }}
+                      tabIndex={index === fileCursor ? 0 : -1}
+                      onFocus={() => {
+                        setFileCursor(index);
+                        setActivePath(file.path);
+                      }}
+                      onClick={() => chooseFile(file.path, true)}
+                      aria-current={file.path === activePath ? 'page' : undefined}
+                      aria-label={`${file.status} ${visiblePath(file.path)}${reviewed.has(file.path) ? ', reviewed' : ', not reviewed'}${commentCounts.has(file.path) ? `, ${commentCounts.get(file.path)} comments` : ''}`}
+                    >
+                      <span className={`status-dot ${file.status}`} aria-hidden="true">
+                        {statusLabel(file)}
+                      </span>
+                      <span className="file-name">{visiblePath(file.path)}</span>
+                      {commentCounts.has(file.path) && (
+                        <span className="count-badge">{commentCounts.get(file.path)}</span>
+                      )}
+                    </button>
+                    <button
+                      className={`review-check ${reviewed.has(file.path) ? 'done' : ''}`}
+                      role="checkbox"
+                      aria-checked={reviewed.has(file.path)}
+                      aria-label={`${reviewed.has(file.path) ? 'Mark unreviewed' : 'Mark reviewed'} ${visiblePath(file.path)}`}
+                      onFocus={() => {
+                        setFileCursor(index);
+                        setActivePath(file.path);
+                      }}
+                      onClick={() => toggleReviewed(file.path)}
+                    >
+                      {reviewed.has(file.path) ? '✓' : '○'}
+                    </button>
+                  </div>
+                ))}
+                {!filteredFiles.length && <p className="no-files">No files match “{query}”.</p>}
+              </nav>
+              <div className="keyboard-card">
+                <span>
+                  <kbd>{commandById('row-next').bindings[0]}</kbd>
+                  <kbd>{commandById('row-previous').bindings[0]}</kbd> move
                 </span>
-              </button>
-            ))}
-            {!filteredFiles.length && <p className="no-files">No files match “{query}”.</p>}
-          </nav>
-          <div className="keyboard-card">
-            <span>
-              <kbd>{commandById('row-next').bindings[0]}</kbd>
-              <kbd>{commandById('row-previous').bindings[0]}</kbd> move
-            </span>
-            <span>
-              <kbd>{commandById('quick-find').bindings[0]}</kbd> find
-            </span>
-            <span>
-              <kbd>{commandById('help').bindings[0]}</kbd> help
-            </span>
-          </div>
+                <span>
+                  <kbd>{commandById('quick-find').bindings[0]}</kbd> find
+                </span>
+                <span>
+                  <kbd>{commandById('focus-diff').bindings[0]}</kbd> diff
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="guide-panel">
+              <p className="guide-intro">
+                A local reading path generated from this exact revision. It never replaces the raw
+                file list.
+              </p>
+              {guide.map((chapter, chapterIndex) => (
+                <section className="guide-chapter" key={chapter.id}>
+                  <span className="guide-number">{chapterIndex + 1}</span>
+                  <h3>{chapter.title}</h3>
+                  <p>{chapter.why}</p>
+                  <ol>
+                    {chapter.stops.map((stop) => {
+                      const index = guideStops.findIndex(
+                        (candidate) => candidate.path === stop.path && candidate.hunk === stop.hunk,
+                      );
+                      return (
+                        <li key={`${stop.path}:${stop.hunk}`}>
+                          <button
+                            ref={(node) => {
+                              if (node) guideRefs.current.set(index, node);
+                              else guideRefs.current.delete(index);
+                            }}
+                            className={index === guideIndex ? 'active' : ''}
+                            onClick={() => goGuideStop(index)}
+                          >
+                            {visiblePath(stop.label)}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
+              ))}
+            </div>
+          )}
         </aside>
         {sidebarOpen && (
           <button
@@ -986,7 +1233,13 @@ export function App() {
             aria-label="Close changed files"
           />
         )}
-        <main className="review-main" id="review-diff" tabIndex={-1}>
+        <main
+          ref={diffRef}
+          className="review-main"
+          id="review-diff"
+          tabIndex={-1}
+          data-region="diff"
+        >
           {activeFile ? (
             <article className="file-review">
               <div className="file-toolbar">
@@ -1029,10 +1282,17 @@ export function App() {
                   </button>
                   <button
                     className={`reviewed-button ${reviewed.has(activeFile.path) ? 'done' : ''}`}
-                    onClick={toggleReviewed}
+                    onClick={() => toggleReviewed()}
                     aria-keyshortcuts={ariaKeyShortcuts('toggle-reviewed')}
                   >
                     {reviewed.has(activeFile.path) ? '✓ Reviewed' : 'Mark reviewed'}
+                  </button>
+                  <button
+                    className="secondary-button next-unreviewed"
+                    onClick={nextUnreviewed}
+                    aria-keyshortcuts={ariaKeyShortcuts('next-unreviewed')}
+                  >
+                    Next unreviewed
                   </button>
                 </div>
               </div>
@@ -1046,6 +1306,23 @@ export function App() {
                   Click a line to select · Shift-click for a range · C to comment
                 </span>
               </div>
+              {guideStops.length > 0 && (
+                <nav className="guide-nav" aria-label="Guided review controls">
+                  <button disabled={guideIndex === 0} onClick={() => goGuideStop(guideIndex - 1)}>
+                    ← Previous
+                  </button>
+                  <button className="guide-location" onClick={returnToGuide}>
+                    Guide · {guideStops[guideIndex]?.chapterTitle} · {guideIndex + 1}/
+                    {guideStops.length}
+                  </button>
+                  <button
+                    disabled={guideIndex === guideStops.length - 1}
+                    onClick={() => goGuideStop(guideIndex + 1)}
+                  >
+                    Next →
+                  </button>
+                </nav>
+              )}
               {composer && composer.scope !== 'line' && (
                 <InlineComposer
                   composer={composer}
@@ -1089,6 +1366,14 @@ export function App() {
                       key={hunkIndex}
                       aria-label={`Hunk ${hunkIndex + 1} of ${activeFile.hunks.length}`}
                     >
+                      <ContextGap
+                        file={activeFile}
+                        hunk={hunkIndex}
+                        position="before"
+                        result={expandedContext.get(`${activeFile.path}:${hunkIndex}:before`)}
+                        busy={contextBusy === `${activeFile.path}:${hunkIndex}:before`}
+                        onExpand={() => expandContext(activeFile, hunkIndex, 'before')}
+                      />
                       <div className="hunk-header">{hunk.header}</div>
                       {hunk.lines.map((line, index) => {
                         const side: CommentSide = line.kind === 'deletion' ? 'old' : 'new';
@@ -1154,6 +1439,16 @@ export function App() {
                           </button>
                         );
                       })}
+                      {hunkIndex === activeFile.hunks.length - 1 && (
+                        <ContextGap
+                          file={activeFile}
+                          hunk={hunkIndex}
+                          position="after"
+                          result={expandedContext.get(`${activeFile.path}:${hunkIndex}:after`)}
+                          busy={contextBusy === `${activeFile.path}:${hunkIndex}:after`}
+                          onExpand={() => expandContext(activeFile, hunkIndex, 'after')}
+                        />
+                      )}
                     </section>
                   ))
                 )}
