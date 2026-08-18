@@ -30,6 +30,8 @@ export interface ReviewFile {
   deletions: number;
   binary: boolean;
   truncated: boolean;
+  oldLineCount?: number;
+  newLineCount?: number;
   hunks: DiffHunk[];
 }
 
@@ -130,6 +132,7 @@ export interface SessionRecord {
   summary: ReviewSummary;
   files: ReviewFile[];
   events: ReviewEvent[];
+  wakeFile?: string;
 }
 
 export interface OpenResult {
@@ -139,6 +142,7 @@ export interface OpenResult {
   headSha: string;
   browserUrl: string;
   resumed: boolean;
+  wakeFileArmed: boolean;
   status: 'open';
 }
 
@@ -149,4 +153,30 @@ export interface PollResult {
   nextCursor: number;
   timedOut: boolean;
   events: ReviewEvent[];
+}
+
+export type ContextPosition = 'before' | 'after';
+
+export interface ContextLine {
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+}
+
+export interface ContextResult {
+  schemaVersion: typeof SCHEMA_VERSION;
+  sessionId: string;
+  path: string;
+  hunk: number;
+  position: ContextPosition;
+  total: number;
+  lines: ContextLine[];
+}
+
+export interface ReviewWakeEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  sessionId: string;
+  sequence: number;
+  type: ReviewEvent['type'];
+  event: ReviewEvent;
 }

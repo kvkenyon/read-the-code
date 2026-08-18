@@ -11,13 +11,16 @@ Read the Code is a standalone, local-first product. `read-the-code-axi` resolves
 Node.js 20.12 or newer and Git are required.
 
 ```bash
-npx -y read-the-code-axi open \
+npm install --global read-the-code-axi
+read-the-code-axi open \
   --repo /path/to/repository \
   --base main \
   --head feature/my-change
 ```
 
-The package is not published as part of this repository foundation. From a clone, use:
+For a zero-install trial, replace the executable with `npx -y read-the-code-axi`. The package is public on npm; it contains the CLI, bundled offline UI, and portable agent skill.
+
+Clone-and-build is only the contributor path:
 
 ```bash
 npm install
@@ -31,20 +34,17 @@ npx read-the-code-axi open --repo . --base main --head HEAD
 
 The canonical [Read the Code skill](skills/read-the-code/SKILL.md) follows the open [Agent Skills specification](https://agentskills.io/specification). It teaches coding agents to manage the exact-revision CLI lifecycle, durable cursors, untrusted feedback, capability secrecy, recovery, and exact-head approval without depending on a pull request or a vendor-specific control plane.
 
-Install the skill from a public source checkout by copying or linking the complete directory into a supported skill location:
+Install the skill globally for detected agent clients in one command with the open [`skills` CLI](https://github.com/vercel-labs/skills):
 
 ```bash
-git clone --depth 1 https://github.com/kvkenyon/read-the-code.git
-mkdir -p "$HOME/.agents/skills"
-ln -s "$PWD/read-the-code/skills/read-the-code" "$HOME/.agents/skills/read-the-code"
+npx skills add kvkenyon/read-the-code --skill read-the-code -g -y
 ```
 
-The npm tarball also carries the directory. After installing a local or published package, copy it directly from the package:
+The npm package also ships the canonical directory. To copy that exact published skill into a project without another download:
 
 ```bash
-npm install /path/to/read-the-code-axi-0.1.0.tgz
 mkdir -p .agents/skills
-cp -R node_modules/read-the-code-axi/skills/read-the-code .agents/skills/read-the-code
+cp -R "$(npm root -g)/read-the-code-axi/skills/read-the-code" .agents/skills/read-the-code
 ```
 
 Use the destination recognized by the agent client and desired scope:
@@ -58,7 +58,7 @@ Use the destination recognized by the agent client and desired scope:
 
 These locations are documented by [Agent Skills](https://agentskills.io/client-implementation/adding-skills-support), [Codex](https://developers.openai.com/codex/build-skills), [Claude Code](https://code.claude.com/docs/en/skills), [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/add-skills), and [pi](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md). Client discovery rules evolve; prefer the client-native path above if a particular version does not scan `.agents/skills`.
 
-The skill expects `read-the-code-axi` on `PATH`. The npm package is not published by this repository change; from a trusted checkout, run `npm install`, `npm run build`, and `npm link`, or install a locally produced tarball. Once a release is published, `npm install --global read-the-code-axi` is the direct CLI install.
+The skill expects `read-the-code-axi` on `PATH`; install it with `npm install --global read-the-code-axi`.
 
 Example prompt:
 
@@ -67,7 +67,7 @@ Example prompt:
 ## CLI
 
 ```text
-read-the-code-axi open --repo <path> --base <ref> --head <ref> [--no-browser] [--json]
+read-the-code-axi open --repo <path> --base <ref> --head <ref> [--wake-file <path>] [--no-browser] [--json]
 read-the-code-axi status <session> [--json]
 read-the-code-axi poll <session> [--after <cursor>] [--timeout <duration>] [--full] [--json]
 read-the-code-axi export <session> [--diagnostic] [--full] [--json]
@@ -82,9 +82,11 @@ Use `--full` for complete TOON event/export content. Use explicit `--json` for t
 
 Durations accept `ms`, `s`, or `m`, such as `500ms`, `30s`, and `2m`. The packed-product smoke test decodes every default response with the official TOON decoder, exercises the full lifecycle in both surfaces, and requires the bounded default export to be at least 10% smaller than its complete JSON counterpart. Its representative hostile-comment fixture currently measures 1,991 B TOON versus 7,954 B JSON (75% smaller), demonstrating the practical token-saving direction without making a tokenizer-specific claim.
 
-### Agent loop
+### Agent return loop
 
 `poll` never deletes events. Every feedback batch, approval, and end event has a durable, monotonically increasing `sequence`. Store `nextCursor` only after processing the returned events, then pass it back with `--after`; restarting a polling process cannot lose queued feedback.
+
+An instantiator can pass `--wake-file <private-path>` to `open`. Each browser submission appends a mode-`0600`, secret-free JSONL wake record to that path, allowing a local agent manager such as firstmate to schedule the originating agent immediately. The record contains the session, sequence, event type, and submitted event fields—never the authenticated URL or token. Wake delivery is advisory: after waking, consume and checkpoint the authoritative event with `poll`.
 
 ```bash
 review=$(read-the-code-axi open \
@@ -120,12 +122,14 @@ Use default TOON for a human-readable shell check, for example `read-the-code-ax
 ## Review experience
 
 - Searchable changed-file navigation with reviewed state and comment counts.
+- Optional deterministic Guide chapters order contracts, behavior, experience, and proof, with previous/next links to real hunks.
 - Unified and split syntax-highlighted diffs with additions, deletions, context, hunks, line numbers, renamed/deleted/added files, binary notices, and explicit large-file containment.
+- Expand controls load hidden surrounding lines from the session's exact base/head trees, never the working tree.
 - Click a line to comment; Shift-click another line on the same side for a range.
 - Editable draft comments, file comments, and general comments submitted together as one durable feedback event.
 - Explicit approval bound to the displayed head SHA and a separate end-review action.
 - Stale-head warning and invalidated approval state when the requested head ref moves.
-- Keyboard navigation: <kbd>J</kbd>/<kbd>K</kbd> files, <kbd>U</kbd>/<kbd>S</kbd> layout, <kbd>G</kbd> general comment, and <kbd>Esc</kbd> cancel.
+- Keyboard navigation: <kbd>j</kbd>/<kbd>k</kbd> items, <kbd>gg</kbd>/<kbd>G</kbd> first/last, <kbd>n</kbd>/<kbd>p</kbd> hunks, <kbd>v</kbd> selection, <kbd>m</kbd> reviewed, <kbd>]</kbd> next unreviewed, <kbd>g f</kbd>/<kbd>g d</kbd> file/diff focus, <kbd>Cmd/Ctrl+B</kbd> sidebar, and <kbd>Cmd/Ctrl+K</kbd> command palette.
 - Responsive file drawer and horizontally contained diffs on narrow screens.
 
 The browser cannot edit or write source files.
@@ -162,5 +166,9 @@ npm run test:skill     # skill format, CLI help contract, examples, and links
 npm run test:e2e       # real Chromium review workflow
 npm run release:check  # complete local release gate and npm pack dry run
 ```
+
+## Releases
+
+Set the repository `NPM_TOKEN` secret to a granular npm token allowed to publish this package with 2FA bypass. Push a version tag that exactly matches `package.json` (for example, `v0.1.1`): [the release workflow](.github/workflows/release.yml) runs `npm run release:check` and publishes the public package with provenance. Publishing distributes the local CLI and bundled assets; it does not add a hosted review service.
 
 See [architecture](docs/architecture.md), [typed protocol](docs/protocol.md), and [contributing](CONTRIBUTING.md) for implementation details. Read the Code is available under the [MIT License](LICENSE).

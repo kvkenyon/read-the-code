@@ -38,6 +38,8 @@ Session updates acquire an exclusive lock and replace JSON atomically. Stale loc
 
 The event list is append-only in meaning. `sequence` increases within a session and is never reused. A long-poll waits on an in-process notification rather than repeatedly reading. Events remain stored after delivery, so a client resumes with its last processed cursor and cannot lose a feedback batch during restart. This is intentionally a single-machine protocol, not a distributed queue.
 
+At `open`, a local instantiator may arm a private wake file. After committing an event to session state, the store appends a secret-free JSONL wake record there. Agent managers can watch that file and schedule the originating agent without waiting for a human message. The wake path is private implementation state and omitted from exports; the wake is advisory, while cursor-based `poll` remains replayable source of truth.
+
 ## Anchors and stale revisions
 
 A line anchor carries:
@@ -56,7 +58,7 @@ Large-review characterization and the additive data-loading direction are docume
 
 The server only accepts `127.0.0.1`. It validates the exact Host header and rejects a supplied Origin other than its own loopback origin. Browser/API session routes require the session bearer capability; the health route requires a distinct server-management capability. The token is placed after `#` in the browser URL and therefore is not part of the initial HTTP request.
 
-Static serving is allowlisted to `index.html` and generated asset filenames. There is no route for arbitrary filesystem content. API errors are JSON with stable codes. Mutation requests require JSON, have a 128 KB transport cap, and receive narrower domain validation. Responses include CSP, no-sniff, frame denial, no-referrer, and restrictive permissions headers.
+Static serving is allowlisted to `index.html` and generated asset filenames. There is no route for arbitrary filesystem content. The context route can only address a rendered file and hunk already bound to the session, and reads surrounding lines directly from the pinned Git blobs with a 200-line response limit. API errors are JSON with stable codes. Mutation requests require JSON, have a 128 KB transport cap, and receive narrower domain validation. Responses include CSP, no-sniff, frame denial, no-referrer, and restrictive permissions headers.
 
 ## Build and package
 

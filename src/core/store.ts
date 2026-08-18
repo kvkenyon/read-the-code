@@ -21,6 +21,7 @@ import type {
   ReviewEvent,
   ReviewManifest,
   ReviewSummary,
+  ReviewWakeEvent,
   SessionExport,
   SessionRecord,
 } from '../protocol.js';
@@ -198,6 +199,7 @@ export class SessionStore {
         record = await this.read(input.id);
         record.status = 'open';
         record.updatedAt = now;
+        record.wakeFile = input.wakeFile;
       } else {
         record = {
           ...input,
@@ -303,7 +305,7 @@ export class SessionStore {
         409,
       );
     }
-    return this.update(id, (record) => {
+    return this.updateWithWake(id, (record) => {
       if (record.status !== 'open') throw new AppError('Review has ended', 'SESSION_ENDED', 8, 409);
       drafts.forEach((draft) => this.validateDraft(record, draft));
       const createdAt = new Date().toISOString();
@@ -324,7 +326,7 @@ export class SessionStore {
   }
 
   async approve(id: string): Promise<ApprovalSubmission> {
-    return this.update(id, (record) => {
+    return this.updateWithWake(id, (record) => {
       if (record.status !== 'open') throw new AppError('Review has ended', 'SESSION_ENDED', 8, 409);
       const event: ApprovalSubmission = {
         schemaVersion: SCHEMA_VERSION,
@@ -343,7 +345,7 @@ export class SessionStore {
   }
 
   async end(id: string): Promise<EndSubmission> {
-    return this.update(id, (record) => {
+    return this.updateWithWake(id, (record) => {
       const existing = record.events.findLast(
         (event): event is EndSubmission => event.type === 'end',
       );
@@ -454,6 +456,48 @@ export class SessionStore {
       await atomicWrite(this.recordPath(id), record);
       return result;
     });
+  }
+
+  private async updateWithWake<T extends ReviewEvent>(
+    id: string,
+    mutate: (record: SessionRecord) => T,
+  ): Promise<T> {
+    const { result, wakeFile, shouldWake } = await withLock(this.lockPath(id), async () => {
+      const record = await this.read(id);
+      const eventCount = record.events.length;
+      const result = mutate(record);
+      record.updatedAt = new Date().toISOString();
+      await atomicWrite(this.recordPath(id), record);
+      return {
+        result,
+        wakeFile: record.wakeFile,
+        shouldWake: record.events.length > eventCount,
+      };
+    });
+    if (wakeFile && shouldWake) {
+      const capability = await this.token(id);
+      const wake: ReviewWakeEvent = {
+        schemaVersion: SCHEMA_VERSION,
+        sessionId: id,
+        sequence: result.sequence,
+        type: result.type,
+        event: result,
+      };
+      const handle = await open(
+        wakeFile,
+        constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      try {
+        await handle.appendFile(
+          `${JSON.stringify(wake).replaceAll(capability, '[REDACTED_CAPABILITY]')}\n`,
+        );
+      } finally {
+        await handle.close();
+      }
+      await chmod(wakeFile, 0o600);
+    }
+    return result;
   }
 }
 

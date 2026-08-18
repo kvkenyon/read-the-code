@@ -4,11 +4,12 @@ import { stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { CommentDraft, PollResult } from '../protocol.js';
+import type { CommentDraft, ContextPosition, ContextResult, PollResult } from '../protocol.js';
 import { SCHEMA_VERSION } from '../protocol.js';
 import { AppError, errorMessage } from './errors.js';
 import { LIMITS } from './limits.js';
 import { clearRegistry, SessionStore, writeRegistry, type ServerRegistry } from './store.js';
+import { hunkContext } from './git.js';
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy':
@@ -128,7 +129,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Rev
         throw new AppError('Cross-origin request rejected', 'INVALID_ORIGIN', 9, 403);
       }
       const rawTarget = request.url ?? '/';
-      if (/(?:^|\/|%2f|%5c)\.\.(?:\/|%2f|%5c|$)|%(?:2e|2f|5c)/iu.test(rawTarget)) {
+      const rawPath = rawTarget.split('?', 1)[0];
+      if (/(?:^|\/|%2f|%5c)\.\.(?:\/|%2f|%5c|$)|%(?:2e|2f|5c)/iu.test(rawPath)) {
         throw new AppError('Invalid request path', 'INVALID_PATH', 2, 400);
       }
       const url = new URL(rawTarget, `http://${expectedHost}`);
@@ -142,7 +144,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Rev
       }
 
       const match =
-        /^\/api\/v1\/sessions\/([a-f0-9]{24})(?:\/(feedback|approval|end|events))?$/u.exec(
+        /^\/api\/v1\/sessions\/([a-f0-9]{24})(?:\/(feedback|approval|end|events|context))?$/u.exec(
           url.pathname,
         );
       if (match) {
@@ -174,6 +176,39 @@ export async function startServer(options: StartServerOptions = {}): Promise<Rev
             nextCursor: events.at(-1)?.sequence ?? after,
             timedOut: events.length === 0,
             events,
+          };
+          sendJson(response, 200, result);
+          return;
+        }
+        if (request.method === 'GET' && action === 'context') {
+          const path = url.searchParams.get('path') ?? '';
+          const hunk = Number(url.searchParams.get('hunk'));
+          const position = url.searchParams.get('position') as ContextPosition;
+          const lines = Number(url.searchParams.get('lines') ?? '20');
+          if (
+            !Number.isSafeInteger(hunk) ||
+            hunk < 0 ||
+            !['before', 'after'].includes(position) ||
+            !Number.isSafeInteger(lines) ||
+            lines < 1 ||
+            lines > 200
+          ) {
+            throw new AppError('Invalid context request', 'INVALID_CONTEXT', 2, 400);
+          }
+          const context = await hunkContext(
+            await store.read(sessionId),
+            path,
+            hunk,
+            position,
+            lines,
+          );
+          const result: ContextResult = {
+            schemaVersion: SCHEMA_VERSION,
+            sessionId,
+            path,
+            hunk,
+            position,
+            ...context,
           };
           sendJson(response, 200, result);
           return;

@@ -27,7 +27,7 @@ describe('review command registry', () => {
     expect(commandFor('ArrowDown', 'diff', { ...enabled, characterShortcuts: false })?.id).toBe(
       'row-next',
     );
-    expect(commandFor(':', 'diff', { ...enabled, characterShortcuts: false })).toBeUndefined();
+    expect(commandFor(':', 'diff', enabled)).toBeUndefined();
     expect(commandFor('Mod+K', 'diff', { ...enabled, characterShortcuts: false })?.id).toBe(
       'palette',
     );
@@ -39,7 +39,8 @@ describe('review command registry', () => {
   });
 
   it('derives accessibility shortcut metadata from the same bindings', () => {
-    expect(ariaKeyShortcuts('palette')).toBe(': Meta+K Control+K');
+    expect(ariaKeyShortcuts('palette')).toBe('Meta+K Control+K');
+    expect(ariaKeyShortcuts('toggle-sidebar')).toBe('Meta+B Control+B');
     expect(ariaKeyShortcuts('row-next', 'row-previous')).toContain('ArrowDown');
   });
 });

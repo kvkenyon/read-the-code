@@ -17,6 +17,24 @@ async function git(...args) {
   return (await exec('git', ['-C', target, ...args], { encoding: 'utf8' })).stdout.trim();
 }
 
+const stableCheckoutConstants = `
+export const taxRate = 0.08;
+export const shippingThreshold = 50;
+export const defaultQuantity = 1;
+export const maxQuantity = 99;
+export const centsPerDollar = 100;
+export const minimumSubtotal = 0;
+export const maximumSubtotal = 100000;
+export const discountFloor = 10;
+export const discountCeiling = 500;
+export const defaultLocale = 'en-US';
+export const defaultRegion = 'US';
+export const defaultCurrency = 'USD';
+export const invoicePrefix = 'INV';
+export const receiptPrefix = 'RCT';
+export const checkoutVersion = 1;
+`;
+
 await mkdir(dirname(target), { recursive: true });
 await mkdir(target);
 await git('init', '-q', '--initial-branch=main');
@@ -28,6 +46,8 @@ await writeFile(
   `export function total(items: number[]): number {
   return items.reduce((sum, item) => sum + item, 0);
 }
+${stableCheckoutConstants}
+export const currencyCode = 'USD';
 `,
 );
 await writeFile(`${target}/obsolete.txt`, 'Remove this before release.\n');
@@ -48,6 +68,8 @@ export function total(items: LineItem[]): number {
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
   return Math.round(subtotal * 100) / 100;
 }
+${stableCheckoutConstants}
+export const currencyCode = 'US_DOLLAR';
 `,
 );
 await writeFile(

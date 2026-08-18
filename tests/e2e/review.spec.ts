@@ -64,6 +64,28 @@ test('keyboard-first exact review is safe, accessible, themed, and responsive', 
   await expect(page.getByText('6 files')).toBeVisible();
   expect(requests.every((url) => new URL(url).hostname === '127.0.0.1')).toBe(true);
 
+  const firstFile = page.getByRole('button', { name: /added added\.py/ });
+  await firstFile.focus();
+  await page.keyboard.press('m');
+  await expect(page.locator('.file-row').first().getByRole('checkbox')).toHaveAttribute(
+    'aria-checked',
+    'true',
+  );
+  await page.keyboard.press('m');
+  await page.keyboard.press('j');
+  await expect(page.getByRole('button', { name: /binary binary\.dat/ })).toBeFocused();
+  await page.keyboard.press('Shift+g');
+  await expect(page.locator('.file-row > button:first-child').last()).toBeFocused();
+  await page.keyboard.press('g');
+  await page.keyboard.press('g');
+  await expect(firstFile).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('diff-view').getByRole('option').first()).toBeFocused();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+b' : 'Control+b');
+  await expect(page.getByLabel('Changed files', { exact: true })).toBeHidden();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+b' : 'Control+b');
+  await expect(page.getByLabel('Changed files', { exact: true })).toBeVisible();
+
   const mathFile = page.getByRole('button', { name: /modified src\/math\.ts/ });
   await mathFile.click();
   await expect(page.getByRole('heading', { name: 'src/math.ts' })).toBeVisible();
@@ -71,6 +93,43 @@ test('keyboard-first exact review is safe, accessible, themed, and responsive', 
   await page.getByRole('button', { name: 'Split' }).click();
   await expect(page.getByTestId('diff-view')).toHaveClass(/split/);
   await page.getByRole('button', { name: 'Unified' }).click();
+
+  await expect(page.getByRole('button', { name: /Expand .* hidden .* before/ })).toBeVisible();
+  await page.getByRole('button', { name: /Expand .* hidden .* before/ }).click();
+  await expect(
+    page.locator('.context-line').filter({ hasText: 'export const ten = 10' }),
+  ).toBeVisible();
+
+  await page.getByRole('tab', { name: /Guide/ }).click();
+  await expect(
+    page.getByText('A local reading path generated from this exact revision.'),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'src/math.ts · hunk 2' }).click();
+  const secondHunkFirstLine = page.locator('.hunk').nth(1).getByRole('option').first();
+  await expect(secondHunkFirstLine).toBeFocused();
+  await page.getByRole('button', { name: /Guide · Core behavior/ }).click();
+  await expect(page.getByRole('tab', { name: /Guide/ })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Files' }).click();
+  await mathFile.click();
+
+  const firstDiffLine = page.getByTestId('diff-view').getByRole('option').first();
+  await firstDiffLine.focus();
+  await page.keyboard.press('n');
+  await expect(secondHunkFirstLine).toBeFocused();
+  await page.keyboard.press('p');
+  await expect(firstDiffLine).toBeFocused();
+  await page.keyboard.press('Shift+g');
+  await expect(page.getByTestId('diff-view').getByRole('option').last()).toBeFocused();
+  await page.keyboard.press('g');
+  await page.keyboard.press('g');
+  await expect(firstDiffLine).toBeFocused();
+  await page.keyboard.press('v');
+  await page.keyboard.press('j');
+  await expect(page.getByTestId('diff-view').getByRole('option').nth(1)).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.keyboard.press('Escape');
 
   const line = page.getByTestId('line-new-2');
   await expect(line).toHaveAttribute(
@@ -95,7 +154,6 @@ test('keyboard-first exact review is safe, accessible, themed, and responsive', 
   await expect(page.getByRole('heading', { name: 'src/math.ts' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(find).toHaveValue('');
-  await page.keyboard.press('Escape');
 
   await mathFile.focus();
   await page.keyboard.press('?');
@@ -106,6 +164,8 @@ test('keyboard-first exact review is safe, accessible, themed, and responsive', 
   await expect(mathFile).toBeFocused();
 
   await page.keyboard.press(':');
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(0);
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k');
   const palette = page.getByRole('dialog', { name: 'Command palette' });
   await expect(palette.getByPlaceholder('Type a command')).toBeFocused();
   await page.keyboard.type('unified');
@@ -143,6 +203,13 @@ test('keyboard-first exact review is safe, accessible, themed, and responsive', 
 
   await page.keyboard.press('m');
   await expect(page.locator('.reviewed-button')).toHaveText(/Reviewed/);
+  await page.keyboard.press(']');
+  await expect(page.getByRole('heading', { level: 1 })).not.toHaveText('src/math.ts');
+  await page.keyboard.press('g');
+  await page.keyboard.press('f');
+  const activeCheckbox = page.locator('.file-row .review-check').first();
+  await activeCheckbox.click();
+  await expect(activeCheckbox).toHaveAttribute('aria-checked', 'true');
   await page.getByRole('button', { name: 'Approve exact revision' }).click();
   await expect(page.getByText(/Approved exact head [0-9a-f]{9}/)).toBeVisible();
 
