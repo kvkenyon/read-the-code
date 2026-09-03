@@ -1,0 +1,35 @@
+name: Native preparation
+
+on:
+  pull_request:
+    paths:
+      - native/**
+      - scripts/native-release/**
+      - tests/native-packaging/**
+      - .github/workflows/native-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - native/**
+      - scripts/native-release/**
+      - tests/native-packaging/**
+      - .github/workflows/native-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-validation:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Require Swift 6
+        run: swift --version && swift --version | grep -E 'Apple Swift version 6\.'
+      - run: npm ci
+      - run: scripts/native-check.sh
+      - run: npm run test:native-packaging

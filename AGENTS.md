@@ -8,6 +8,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `.test-state/` is the ignored home for generated repositories and isolated state during local tests. `npm run fixture` creates a representative repository there without touching another checkout.
 - `skills/read-the-code/` is the canonical portable agent skill and ships in the npm tarball. Keep its documented CLI surface aligned with `src/cli.ts`; `npm run test:skill` validates the contract.
 - Version tags matching `package.json` publish through `.github/workflows/release.yml` only after `npm run release:check`; keep the packed-install smoke in that gate.
+- Native packaging preparation is intentionally unsigned and non-publishing: run `npm run test:native-packaging` for CLT-safe validation, and treat `scripts/native-release/require-full-xcode.sh` plus final archive/sign/notarize/clean-install work as later release-host gates.
 
 ## Maintaining this file
 

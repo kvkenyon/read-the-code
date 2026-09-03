@@ -7,3 +7,6 @@ test-results/
 *.tgz
 .pack-smoke-*/
 .test-state/
+.firecrawl/
+native/.build/
+native/ReadTheCode.xcodeproj/

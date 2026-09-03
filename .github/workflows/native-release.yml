@@ -1,0 +1,24 @@
+name: Native release handoff (dry run)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deferred-release-validation:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Require Swift 6
+        run: swift --version && swift --version | grep -E 'Apple Swift version 6\.'
+      - run: npm ci
+      - run: scripts/native-release/native-release-dry-run.sh --dry-run
+      - run: scripts/native-release/require-full-xcode.sh
+      - run: echo 'No credentials were read and no artifact, appcast, or release was published.'

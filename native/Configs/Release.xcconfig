@@ -1,3 +1,13 @@
 MACOSX_DEPLOYMENT_TARGET = 14.0
 RTC_DISTRIBUTION = developer-id-notarized
 RTC_UPDATE_CHANNEL = stable
+// Deliberately blank until a release operator supplies the Developer ID values
+// through an out-of-repository configuration. CI must not infer an identity.
+RTC_DEVELOPMENT_TEAM =
+RTC_SIGNING_IDENTITY =
+DEVELOPMENT_TEAM = $(RTC_DEVELOPMENT_TEAM)
+CODE_SIGN_IDENTITY = $(RTC_SIGNING_IDENTITY)
+CODE_SIGN_STYLE = Manual
+ENABLE_HARDENED_RUNTIME = YES
+OTHER_CODE_SIGN_FLAGS = --timestamp --options runtime
+RTC_SPARKLE_FEED_URL = https://updates.invalid/read-the-code/appcast.xml
