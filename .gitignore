@@ -7,3 +7,5 @@ test-results/
 *.tgz
 .pack-smoke-*/
 .test-state/
+native/.build/
+native/ReadTheCode.xcodeproj/

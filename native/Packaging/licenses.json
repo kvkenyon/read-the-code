@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "packages": {
+    "grdb.swift": "MIT",
+    "sparkle": "MIT"
+  }
+}
