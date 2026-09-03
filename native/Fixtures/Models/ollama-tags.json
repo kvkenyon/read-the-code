@@ -1,1 +1,1 @@
-{"models":[{"name":"llama3.2:latest"},{"name":"qwen2.5-coder:7b"}]}
+{ "models": [{ "name": "llama3.2:latest" }, { "name": "qwen2.5-coder:7b" }] }
