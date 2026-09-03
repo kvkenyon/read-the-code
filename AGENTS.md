@@ -9,6 +9,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `skills/read-the-code/` is the canonical portable agent skill and ships in the npm tarball. Keep its documented CLI surface aligned with `src/cli.ts`; `npm run test:skill` validates the contract.
 - Version tags matching `package.json` publish through `.github/workflows/release.yml` only after `npm run release:check`; keep the packed-install smoke in that gate.
 - Native packaging preparation is intentionally unsigned and non-publishing: run `npm run test:native-packaging` for CLT-safe validation, and treat `scripts/native-release/require-full-xcode.sh` plus final archive/sign/notarize/clean-install work as later release-host gates.
+- `scripts/native-check.sh` builds the landed SwiftPM graph, validates both native manifests, runs every executable smoke, and generates the Xcode project; under Command Line Tools it reports XCTest and Xcode-only gates as explicitly remaining.
 
 ## Maintaining this file
 

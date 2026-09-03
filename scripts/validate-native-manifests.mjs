@@ -1,0 +1,188 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const expectedDependencies = {
+  ReadTheCode: [
+    'RTCContracts',
+    'RTCDesign',
+    'RTCDomain',
+    'RTCIPC',
+    'RTCLifecycle',
+    'RTCReview',
+    'RTCStore',
+  ],
+  rtc: ['RTCCLI'],
+  GitWorker: ['RTCContracts', 'RTCGit'],
+  ModelWorker: ['RTCContracts', 'RTCModelAdapters'],
+  RTCContracts: [],
+  RTCDomain: ['RTCContracts'],
+  RTCStore: ['GRDB', 'RTCContracts'],
+  RTCIPC: ['RTCContracts'],
+  RTCGit: ['RTCContracts'],
+  RTCSyntax: ['RTCContracts'],
+  RTCDiffCanvas: ['RTCContracts'],
+  RTCDiagram: ['RTCContracts'],
+  RTCTour: ['RTCContracts'],
+  RTCModelAdapters: ['RTCContracts'],
+  RTCAgentChat: ['RTCContracts'],
+  RTCReview: ['RTCContracts', 'RTCDomain'],
+  RTCDesign: [],
+  RTCLifecycle: ['RTCContracts'],
+  RTCWorkspaceShell: ['RTCDesign'],
+  RTCCLI: ['RTCIPC'],
+  RTCTestSupport: ['RTCContracts'],
+  RTCAgentChatTests: ['RTCAgentChat', 'RTCContracts'],
+  RTCDesignTests: ['RTCDesign'],
+  RTCGitTests: ['RTCContracts', 'RTCGit'],
+  RTCModelAdapterTests: ['RTCContracts', 'RTCModelAdapters'],
+  RTCStoreTests: ['RTCStore'],
+  RTCWorkspaceShellTests: ['RTCWorkspaceShell'],
+  RTCManifestTests: [],
+  RTCCLITests: ['RTCCLI'],
+  RTCContractTests: ['RTCContracts', 'RTCTestSupport'],
+  RTCDiagramTests: ['RTCContracts', 'RTCDiagram'],
+  RTCDiffCanvasTests: ['RTCContracts', 'RTCDiffCanvas'],
+  RTCDomainTests: ['RTCContracts', 'RTCDomain'],
+  RTCIPCTests: ['RTCContracts', 'RTCIPC'],
+  RTCLifecycleTests: ['RTCContracts', 'RTCLifecycle'],
+  RTCReviewTests: ['RTCContracts', 'RTCDomain', 'RTCReview'],
+  RTCSyntaxTests: ['RTCContracts', 'RTCSyntax'],
+  RTCTourTests: ['RTCContracts', 'RTCTour'],
+};
+
+function fail(message) {
+  throw new Error(message);
+}
+
+function sorted(values) {
+  return [...values].sort();
+}
+
+function targetBlock(name, project) {
+  const lines = project.split('\n');
+  const start = lines.indexOf(`  ${name}:`);
+  if (start < 0) return undefined;
+  let end = start + 1;
+  while (
+    end < lines.length &&
+    (!lines[end].startsWith('  ') || lines[end].startsWith('    ') || !lines[end].endsWith(':'))
+  ) {
+    end += 1;
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+function projectDependencies(block) {
+  return block
+    .split('\n')
+    .map((line) => line.trim())
+    .flatMap((line) => {
+      for (const prefix of ['- target: ', '- package: ']) {
+        if (line.startsWith(prefix)) return [line.slice(prefix.length)];
+      }
+      return [];
+    });
+}
+
+function projectType(block) {
+  return block
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('type: '))
+    ?.slice('type: '.length);
+}
+
+const packageDescription = JSON.parse(
+  execFileSync('/usr/bin/swift', ['package', '--package-path', 'native', 'dump-package'], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+  }),
+);
+const packageTargets = new Map(packageDescription.targets.map((target) => [target.name, target]));
+const project = fs.readFileSync(path.join(repositoryRoot, 'native/project.yml'), 'utf8');
+
+for (const [name, expected] of Object.entries(expectedDependencies)) {
+  const packageTarget = packageTargets.get(name);
+  if (!packageTarget) fail(`SwiftPM is missing target ${name}`);
+  const packageDependencies = packageTarget.dependencies.flatMap((dependency) => {
+    if (dependency.byName) return [dependency.byName[0]];
+    if (dependency.product) return [dependency.product[0]];
+    return [];
+  });
+  if (JSON.stringify(sorted(packageDependencies)) !== JSON.stringify(sorted(expected))) {
+    fail(`SwiftPM dependencies for ${name} are ${packageDependencies}; expected ${expected}`);
+  }
+
+  const block = targetBlock(name, project);
+  if (!block) fail(`XcodeGen is missing target ${name}`);
+  const xcodeDependencies = projectDependencies(block);
+  if (JSON.stringify(sorted(xcodeDependencies)) !== JSON.stringify(sorted(expected))) {
+    fail(`XcodeGen dependencies for ${name} are ${xcodeDependencies}; expected ${expected}`);
+  }
+}
+
+for (const root of ['Sources', 'Tests']) {
+  const directory = path.join(repositoryRoot, 'native', root);
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (!packageTargets.has(entry.name)) fail(`SwiftPM is missing native/${root}/${entry.name}`);
+    if (!targetBlock(entry.name, project)) {
+      fail(`XcodeGen is missing native/${root}/${entry.name}`);
+    }
+  }
+}
+
+for (const [directory, packageType, xcodeType] of [
+  ['RTCAgentChatTests', 'test', 'bundle.unit-test'],
+  ['RTCDesignTests', 'test', 'bundle.unit-test'],
+  ['RTCGitTests', 'test', 'bundle.unit-test'],
+  ['RTCManifestTests', 'test', 'bundle.unit-test'],
+  ['RTCModelAdapterTests', 'test', 'bundle.unit-test'],
+  ['RTCStoreTests', 'test', 'bundle.unit-test'],
+  ['RTCWorkspaceShellTests', 'test', 'bundle.unit-test'],
+  ['RTCCLITests', 'executable', 'tool'],
+  ['RTCContractTests', 'executable', 'tool'],
+  ['RTCDiagramTests', 'executable', 'tool'],
+  ['RTCDiffCanvasTests', 'executable', 'tool'],
+  ['RTCDomainTests', 'executable', 'tool'],
+  ['RTCIPCTests', 'executable', 'tool'],
+  ['RTCLifecycleTests', 'executable', 'tool'],
+  ['RTCReviewTests', 'executable', 'tool'],
+  ['RTCSyntaxTests', 'executable', 'tool'],
+  ['RTCTourTests', 'executable', 'tool'],
+]) {
+  const source = fs
+    .readdirSync(path.join(repositoryRoot, 'native/Tests', directory))
+    .filter((file) => file.endsWith('.swift'))
+    .map((file) =>
+      fs.readFileSync(path.join(repositoryRoot, 'native/Tests', directory, file), 'utf8'),
+    )
+    .join('\n');
+  if (packageType === 'test' && !source.includes('XCTestCase')) {
+    fail(`${directory} must remain an XCTest suite`);
+  }
+  if (packageType === 'executable' && !source.includes('@main')) {
+    fail(`${directory} must remain an executable smoke suite`);
+  }
+  if (packageTargets.get(directory).type !== packageType) {
+    fail(`SwiftPM target ${directory} must be ${packageType}`);
+  }
+  if (projectType(targetBlock(directory, project)) !== xcodeType) {
+    fail(`XcodeGen target ${directory} must be ${xcodeType}`);
+  }
+}
+
+for (const sourcePath of [
+  'App/ReadTheCodeApp',
+  'CLI/rtc/main.swift',
+  'CLI/rtc/RTCCLI.swift',
+  'Services/GitWorker',
+  'Services/ModelWorker',
+]) {
+  if (!project.includes(sourcePath)) fail(`XcodeGen is missing native/${sourcePath}`);
+}
+
+console.log('Native manifest checks passed.');

@@ -168,7 +168,9 @@ public struct IPCClient: Sendable {
 }
 
 public final class IPCServer: @unchecked Sendable {
-    private let path: String; private let dispatcher: IPCDispatcher; private var listener: Int32 = -1; private let queue = DispatchQueue(label: "com.readthecode.ipc", qos: .userInitiated)
+    private let path: String; private let dispatcher: IPCDispatcher; private var listener: Int32 = -1
+    private let acceptQueue = DispatchQueue(label: "com.readthecode.ipc.accept", qos: .userInitiated)
+    private let clientQueue = DispatchQueue(label: "com.readthecode.ipc.client", qos: .userInitiated, attributes: .concurrent)
     public init(socketPath: String, dispatcher: IPCDispatcher) { self.path = socketPath; self.dispatcher = dispatcher }
     public func start() throws {
         #if canImport(Darwin)
@@ -184,13 +186,39 @@ public final class IPCServer: @unchecked Sendable {
         let length = socklen_t(MemoryLayout<sa_family_t>.size + bytes.count)
         guard withUnsafePointer(to: &address, { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, length) } }) == 0, listen(listener, 16) == 0 else { throw IPCTransportError.bindFailed }
         chmod(path, 0o600)
-        queue.async { [weak self] in self?.acceptLoop() }
+        acceptQueue.async { [weak self] in self?.acceptLoop() }
     }
     public func stop() { if listener >= 0 { shutdown(listener, Int32(SHUT_RDWR)); close(listener); listener = -1; unlink(path) } }
-    private func acceptLoop() { while listener >= 0 { let client = accept(listener, nil, nil); guard client >= 0 else { continue }; queue.async { [weak self] in self?.serve(client) } } }
+    private func acceptLoop() { while listener >= 0 { let client = accept(listener, nil, nil); guard client >= 0 else { continue }; clientQueue.async { [weak self] in self?.serve(client) } } }
     private func serve(_ fd: Int32) { defer { close(fd) }; var prefix = Data(count: 4); do { try read(fd, &prefix); let n = Int(prefix[0]) << 24 | Int(prefix[1]) << 16 | Int(prefix[2]) << 8 | Int(prefix[3]); guard n <= IPCConstants.maxFrameBytes else { return }; var payload = Data(count: n); try read(fd, &payload); var frame = prefix; frame.append(payload); let response = Task { await dispatcher.dispatch(frame: frame, fileDescriptor: fd) }; let result = try awaitResult(response); _ = result.withUnsafeBytes { write(fd, $0.baseAddress!, result.count) } } catch {} }
     private func read(_ fd: Int32, _ data: inout Data) throws { let count = data.count; try data.withUnsafeMutableBytes { raw in var i = 0; while i < count { let n = DarwinOrGlibc(fd, raw.baseAddress!.advanced(by: i), count - i); guard n > 0 else { throw IPCFrameError.truncated }; i += n } } }
-    private func awaitResult(_ task: Task<Data, Never>) throws -> Data { let semaphore = DispatchSemaphore(value: 0); var result = Data(); Task { result = await task.value; semaphore.signal() }; semaphore.wait(); return result }
+    private func awaitResult(_ task: Task<Data, Never>) throws -> Data {
+        let semaphore = DispatchSemaphore(value: 0)
+        let result = LockedIPCData()
+        Task {
+            result.store(await task.value)
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result.load()
+    }
+}
+
+private final class LockedIPCData: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Data()
+
+    func store(_ value: Data) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    func load() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }
 
 #if canImport(Darwin)
