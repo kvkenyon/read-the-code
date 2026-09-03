@@ -5,6 +5,7 @@ private func dataFromLines(_ stream: AsyncThrowingStream<Data, Error>, limits: M
                            decode: @escaping ([String: Any]) throws -> Data) async throws -> Data {
     var buffer = Data(), output = Data()
     for try await chunk in stream {
+        try Task.checkCancellation()
         buffer.append(chunk); if buffer.count > limits.maxResponseBytes { throw ModelAdapterError.responseTooLarge }
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer[..<newline]; buffer.removeSubrange(...newline)
@@ -26,7 +27,8 @@ private func dataFromLines(_ stream: AsyncThrowingStream<Data, Error>, limits: M
 public final class OllamaAdapter: ModelAdapter, @unchecked Sendable {
     public let endpoint: LoopbackEndpoint; public let model: String; public let limits: ModelLimits
     private let transport: any ModelHTTPTransport; private let credentials: any ModelCredentialLookup; private let gate: ModelConcurrencyGate
-    private var currentTask: Task<Void, Never>?
+    private let taskLock = NSLock()
+    private var activeTasks: [UUID: Task<Data, Error>] = [:]
     public init(endpoint: LoopbackEndpoint, model: String, limits: ModelLimits = .init(),
                 transport: any ModelHTTPTransport = URLSessionModelTransport(), credentials: any ModelCredentialLookup = NoCredentials()) {
         self.endpoint = endpoint; self.model = model; self.limits = limits; self.transport = transport; self.credentials = credentials; self.gate = ModelConcurrencyGate(limit: limits.maxConcurrentRequests)
@@ -40,6 +42,17 @@ public final class OllamaAdapter: ModelAdapter, @unchecked Sendable {
     }
     public func health() async throws -> Bool { _ = try await discoverModels(); return true }
     public func generateStructured(request: Data, schema: Data) async throws -> Data {
+        let taskID = UUID()
+        let task = Task { try await self.performGenerate(request: request, schema: schema) }
+        taskLock.withLock { activeTasks[taskID] = task }
+        defer { taskLock.withLock { activeTasks[taskID] = nil } }
+        return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+    }
+    public func cancel() async {
+        let tasks = taskLock.withLock { let tasks = Array(activeTasks.values); activeTasks.removeAll(); return tasks }
+        tasks.forEach { $0.cancel() }
+    }
+    private func performGenerate(request: Data, schema: Data) async throws -> Data {
         try ModelJSON.bounded(request, limits); try ModelJSON.bounded(schema, limits); try await gate.enter(); defer { Task { await gate.leave() } }
         var body: [String: Any] = ["model": model, "prompt": String(data: request, encoding: .utf8) ?? "", "stream": true]
         if let schemaObject = try? JSONSerialization.jsonObject(with: schema) { body["format"] = schemaObject }
@@ -50,13 +63,13 @@ public final class OllamaAdapter: ModelAdapter, @unchecked Sendable {
             throw ModelAdapterError.malformedResponse
         }
     }
-    public func cancel() async { currentTask?.cancel(); currentTask = nil }
     private func makeRequest(path: String, method: String) -> URLRequest { var r = URLRequest(url: endpoint.url.appendingPathComponent(String(path.dropFirst()))); r.httpMethod = method; return r }
 }
 
 public final class OpenAICompatibleAdapter: ModelAdapter, @unchecked Sendable {
     public let endpoint: LoopbackEndpoint; public let model: String; public let limits: ModelLimits
     private let transport: any ModelHTTPTransport; private let credentials: any ModelCredentialLookup; private let credentialKey: String; private let gate: ModelConcurrencyGate
+    private let taskLock = NSLock(); private var activeTasks: [UUID: Task<Data, Error>] = [:]
     public init(endpoint: LoopbackEndpoint, model: String, credentialKey: String = "openai-compatible", limits: ModelLimits = .init(), transport: any ModelHTTPTransport = URLSessionModelTransport(), credentials: any ModelCredentialLookup = NoCredentials()) {
         self.endpoint = endpoint; self.model = model; self.credentialKey = credentialKey; self.limits = limits; self.transport = transport; self.credentials = credentials; self.gate = ModelConcurrencyGate(limit: limits.maxConcurrentRequests)
     }
@@ -67,15 +80,25 @@ public final class OpenAICompatibleAdapter: ModelAdapter, @unchecked Sendable {
     }
     public func health() async throws -> Bool { _ = try await discoverModels(); return true }
     public func generateStructured(request: Data, schema: Data) async throws -> Data {
+        let taskID = UUID()
+        let task = Task { try await self.performGenerate(request: request, schema: schema) }
+        taskLock.withLock { activeTasks[taskID] = task }
+        defer { taskLock.withLock { activeTasks[taskID] = nil } }
+        return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+    }
+    private func performGenerate(request: Data, schema: Data) async throws -> Data {
         try ModelJSON.bounded(request, limits); try ModelJSON.bounded(schema, limits); try await gate.enter(); defer { Task { await gate.leave() } }
         guard JSONSerialization.isValidJSONObject((try? JSONSerialization.jsonObject(with: request)) as Any) else { throw ModelAdapterError.malformedResponse }
         let messages: Any = (try? JSONSerialization.jsonObject(with: request)) ?? [["role": "user", "content": String(data: request, encoding: .utf8) ?? ""]]
-        var body: [String: Any] = ["model": model, "messages": messages, "stream": true, "response_format": ["type": "json_schema", "json_schema": ["name": "tour", "schema": (try? JSONSerialization.jsonObject(with: schema)) ?? [:]]]]
+        let body: [String: Any] = ["model": model, "messages": messages, "stream": true, "response_format": ["type": "json_schema", "json_schema": ["name": "tour", "schema": (try? JSONSerialization.jsonObject(with: schema)) ?? [:]]]]
         return try await dataFromLines(try await stream(path: "/v1/chat/completions", method: "POST", body: try JSONSerialization.data(withJSONObject: body)), limits: limits) { item in
             guard let choices = item["choices"] as? [[String: Any]], let delta = choices.first?["delta"] as? [String: Any], let content = delta["content"] as? String else { return Data() }; return Data(content.utf8)
         }
     }
-    public func cancel() async {}
+    public func cancel() async {
+        let tasks = taskLock.withLock { let tasks = Array(activeTasks.values); activeTasks.removeAll(); return tasks }
+        tasks.forEach { $0.cancel() }
+    }
     private func send(path: String, method: String, body: Data?) async throws -> Data {
         let stream = try await stream(path: path, method: method, body: body); var result = Data()
         for try await chunk in stream { result.append(chunk); guard result.count <= limits.maxResponseBytes else { throw ModelAdapterError.responseTooLarge } }

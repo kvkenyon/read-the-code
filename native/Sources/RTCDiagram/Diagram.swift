@@ -20,7 +20,9 @@ public struct ValidatedDiagram: Hashable, Sendable {
 
     public init(document: DiagramDocument) throws {
         guard !document.nodes.isEmpty else { throw DiagramValidationError.emptyGraph }
-        guard document.nodes.count <= RTCConstants.maxNodes, document.edges.count <= RTCConstants.maxEdges else { throw DiagramValidationError.limitExceeded }
+        guard document.nodes.count <= RTCConstants.maxNodes,
+              document.edges.count <= RTCConstants.maxEdges,
+              document.groups.count <= RTCConstants.maxNodes else { throw DiagramValidationError.limitExceeded }
         var nodeIDs = Set<String>()
         for node in document.nodes {
             let id = node.id.value
@@ -30,8 +32,8 @@ public struct ValidatedDiagram: Hashable, Sendable {
         var edgeIDs = Set<String>()
         var totalAnchors = document.anchors.count
         for node in document.nodes { totalAnchors += node.anchors.count }
-        for (index, edge) in document.edges.enumerated() {
-            let edgeID = "\(edge.from.value)->\(edge.to.value)#\(index)"
+        for edge in document.edges {
+            let edgeID = "\(edge.from.value)->\(edge.to.value)#\(edge.role.rawValue)"
             guard edgeIDs.insert(edgeID).inserted else { throw DiagramValidationError.duplicateID(edgeID) }
             guard nodeIDs.contains(edge.from.value) else { throw DiagramValidationError.missingNode(edge.from.value) }
             guard nodeIDs.contains(edge.to.value) else { throw DiagramValidationError.missingNode(edge.to.value) }
@@ -43,7 +45,9 @@ public struct ValidatedDiagram: Hashable, Sendable {
         let nodeSet = nodeIDs
         for group in document.groups {
             guard groups.insert(group.id.value).inserted else { throw DiagramValidationError.duplicateID(group.id.value) }
-            guard group.label.value.count <= RTCConstants.maxLabelCharacters else { throw DiagramValidationError.invalidLabel(group.id.value) }
+            guard group.id.value.count <= RTCConstants.maxLabelCharacters,
+                  group.label.value.count <= RTCConstants.maxLabelCharacters,
+                  group.nodeIDs.count <= RTCConstants.maxNodes else { throw DiagramValidationError.invalidLabel(group.id.value) }
             var members = Set<String>()
             for nodeID in group.nodeIDs {
                 guard nodeSet.contains(nodeID.value), members.insert(nodeID.value).inserted else { throw DiagramValidationError.invalidGroup(group.id.value) }

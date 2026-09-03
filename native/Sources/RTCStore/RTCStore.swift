@@ -67,13 +67,13 @@ public actor SQLiteStore {
     private func removeObservation(_ id: ReviewID, token: UUID) { observations[id]?[token] = nil }
 
     private static func configure(_ db: DatabaseQueue) throws {
-        try db.write { db in
+        try db.writeWithoutTransaction { db in
             try db.execute(sql: "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         }
     }
 
     private static func migrate(_ db: DatabaseQueue) throws {
-        try db.write { db in
+        try db.writeWithoutTransaction { db in
             try db.execute(sql: "CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, checksum TEXT NOT NULL);")
             let checksum = SHA256.hash(data: Data(Migration.v1.utf8)).map { String(format: "%02x", $0) }.joined()
             let existing = try String.fetchOne(db, sql: "SELECT checksum FROM schema_migrations WHERE id = 1")

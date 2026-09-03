@@ -85,16 +85,18 @@ public struct URLSessionModelTransport: ModelHTTPTransport {
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw ModelAdapterError.unavailable }
         return AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 var total = 0
                 do {
                     for try await byte in bytes {
+                        try Task.checkCancellation()
                         total += 1; if total > limits.maxResponseBytes { throw ModelAdapterError.responseTooLarge }
                         continuation.yield(Data([byte]))
                     }
                     continuation.finish()
                 } catch { continuation.finish(throwing: error) }
             }
+            continuation.onTermination = { _ in producer.cancel() }
         }
     }
 }

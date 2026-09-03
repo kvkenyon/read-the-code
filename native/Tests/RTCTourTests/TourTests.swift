@@ -25,7 +25,7 @@ struct FakeArtifacts: ExactArtifactSource {
         guard pack.digest.hex.count == 64 else { throw TestFailure("context digest") }
         let signals = SignalAnalyzer().analyze(pack)
         guard SignalAnalyzer().intents(signals).count == 4 else { throw TestFailure("diagram intents") }
-        let request = TourGenerationRequest(revision: revision, contextDigest: SHA256Digest(data: Data()))
+        let request = TourGenerationRequest(revision: revision, contextDigest: tour.inputDigest)
         let supplied = SuppliedTourProvider(tour: tour)
         let result = await TourCoordinator().run(request: request, provider: supplied, anchors: FakeAnchors(result: true), fallback: supplied) { _ in }
         guard case .success(let generated) = result, generated == tour else { throw TestFailure("provider orchestration") }

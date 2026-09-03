@@ -135,6 +135,7 @@ targets:
       - Sources/RTCTour
     dependencies:
       - target: RTCContracts
+      - target: RTCDiagram
   RTCModelAdapters:
     type: framework
     platform: macOS
@@ -202,10 +203,27 @@ targets:
   RTCTourIntegration:
     type: framework
     platform: macOS
-    sources: []
+    sources:
+      - Sources/RTCTourIntegration
     dependencies:
       - target: RTCContracts
+      - target: RTCDiagram
+      - target: RTCGit
+      - target: RTCModelAdapters
+      - target: RTCStore
+      - target: RTCSyntax
       - target: RTCTour
+      - package: GRDB
+  TourWorkspace:
+    type: framework
+    platform: macOS
+    sources:
+      - Features/TourWorkspace
+    dependencies:
+      - target: RTCContracts
+      - target: RTCDesign
+      - target: RTCDiagram
+      - target: RTCTourIntegration
   RTCAgentChatIntegration:
     type: framework
     platform: macOS
@@ -360,6 +378,20 @@ targets:
     dependencies:
       - target: RTCContracts
       - target: RTCTour
+  TourWorkspaceFeatureTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/TourWorkspaceFeatureTests
+    dependencies:
+      - target: RTCContracts
+      - target: RTCDiagram
+      - target: RTCModelAdapters
+      - target: RTCStore
+      - target: RTCSyntax
+      - target: RTCTour
+      - target: RTCTourIntegration
+      - target: TourWorkspace
   RTCUITests:
     type: bundle.ui-testing
     platform: macOS
