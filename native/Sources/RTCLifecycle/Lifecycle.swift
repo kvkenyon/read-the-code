@@ -134,6 +134,7 @@ public actor LifecycleCoordinator: AppLifecycleService {
     }
 
     public func launchAtLogin(enabled: Bool) async throws { _ = try await registrar.setEnabled(enabled) }
+    public func launchAtLoginEnabled() async -> Bool { await registrar.status().enabled }
     public func launchAtLoginState() async -> LaunchAtLoginState { await registrar.status() }
     public func pendingRoute() -> ActivationRouteEvent? { lastRoute }
 }

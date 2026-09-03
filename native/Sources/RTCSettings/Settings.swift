@@ -142,20 +142,25 @@ public final class RTCSettingsViewModel: ObservableObject {
     }
     public var hasChanges: Bool { draft != persisted }
     public func cancel() { healthGeneration += 1; draft = persisted; validationError = nil; health = .idle }
-    public func reset() async { await transition(to: .default, persistenceAction: { try self.persistence.reset() }, success: { self.canPersist = true; self.loadError = nil }) }
+    public func reset() async {
+        healthGeneration += 1; health = .idle
+        let actualLaunchAtLogin = await lifecycle.launchAtLoginEnabled()
+        await transition(to: .default, persistenceAction: { try self.persistence.reset() }, lifecyclePrevious: actualLaunchAtLogin, success: { self.canPersist = true; self.loadError = nil })
+    }
     public func apply() async {
         guard canPersist else { validationError = "Settings could not be loaded. Reset settings before applying changes."; return }
         let target = draft; await transition(to: target, persistenceAction: { try self.persistence.save(target) })
     }
-    private func transition(to target: RTCSettings, persistenceAction: () throws -> Void, success: (() -> Void)? = nil) async {
+    private func transition(to target: RTCSettings, persistenceAction: () throws -> Void, lifecyclePrevious: Bool? = nil, success: (() -> Void)? = nil) async {
         do { try target.validate() } catch { validationError = "The local model endpoint could not be used."; return }
-        let previous = persisted; let changedLaunch = previous.launchAtLogin != target.launchAtLogin
+        let previous = persisted; let previousLaunch = lifecyclePrevious ?? previous.launchAtLogin
+        let changedLaunch = previousLaunch != target.launchAtLogin
         do {
             if changedLaunch { try await lifecycle.launchAtLogin(enabled: target.launchAtLogin) }
             do { try persistenceAction() }
             catch {
                 if changedLaunch {
-                    do { try await lifecycle.launchAtLogin(enabled: previous.launchAtLogin) }
+                    do { try await lifecycle.launchAtLogin(enabled: previousLaunch) }
                     catch { validationError = "Settings and launch-at-login could not be reconciled."; return }
                 }
                 validationError = "The settings could not be saved."; return

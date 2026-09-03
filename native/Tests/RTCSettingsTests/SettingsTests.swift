@@ -102,9 +102,53 @@ final class SettingsTests: XCTestCase {
     func testFilePersistenceSerializesConcurrentCalls() throws {
         let directory = try temporaryDirectory(); let persistence = FileRTCSettingsPersistence(fileURL: directory.appendingPathComponent("settings.json"))
         let group = DispatchGroup(); let queue = DispatchQueue(label: "settings-test", attributes: .concurrent)
-        for index in 0..<40 { group.enter(); queue.async { defer { group.leave() }; try? persistence.save(RTCSettings(launchAtLogin: index.isMultiple(of: 2))) } }
+        let errors = ErrorCollector()
+        for index in 0..<40 { group.enter(); queue.async { defer { group.leave() }; do { try persistence.save(RTCSettings(launchAtLogin: index.isMultiple(of: 2))) } catch { errors.append(error) } } }
         XCTAssertEqual(group.wait(timeout: .now() + 3), .success)
-        XCTAssertNoThrow(try persistence.load())
+        XCTAssertTrue(errors.values().isEmpty)
+        let final = RTCSettings(notifications: .on, launchAtLogin: true)
+        try persistence.save(final)
+        XCTAssertEqual(try persistence.load(), final)
+    }
+    func testCorruptLoadResetUsesActualLifecycleStateAndCompensatesFailure() async {
+        let successfulLifecycle = RecordingLifecycle(enabled: true)
+        let successful = await MainActor.run { RTCSettingsViewModel(persistence: FailingPersistence(value: .default, failLoad: true), lifecycle: successfulLifecycle) }
+        await successful.reset()
+        let successCalls = await successfulLifecycle.values(); let successEnabled = await successfulLifecycle.enabled()
+        XCTAssertEqual(successCalls, [false]); XCTAssertFalse(successEnabled)
+
+        let failedLifecycle = RecordingLifecycle(enabled: true)
+        let failed = await MainActor.run { RTCSettingsViewModel(persistence: FailingPersistence(value: .default, failLoad: true, failReset: true), lifecycle: failedLifecycle) }
+        await failed.reset()
+        let failedCalls = await failedLifecycle.values(); let failedEnabled = await failedLifecycle.enabled()
+        XCTAssertEqual(failedCalls, [false, true]); XCTAssertTrue(failedEnabled)
+
+        let rollbackLifecycle = RecordingLifecycle(enabled: true, failCalls: [true])
+        let rollback = await MainActor.run { RTCSettingsViewModel(persistence: FailingPersistence(value: .default, failLoad: true, failReset: true), lifecycle: rollbackLifecycle) }
+        await rollback.reset()
+        let error = await MainActor.run { rollback.validationError }
+        XCTAssertEqual(error, "Settings and launch-at-login could not be reconciled.")
+    }
+    func testDelayedHealthCannotOverwriteNewerCancelResetOrModelEdit() async {
+        let transport = DelayedTransport(); let model = RTCSettings.LocalModel(kind: .ollama, endpoint: "http://127.0.0.1:11434", model: "old")
+        let persistence = MemoryPersistence(); let vm = await MainActor.run { RTCSettingsViewModel(persistence: persistence, lifecycle: RecordingLifecycle(), transport: transport) }
+        await MainActor.run { vm.draft.selectedLocalModel = model }
+        let old = Task { await vm.checkHealth() }; await transport.waitForRequests(1)
+        await MainActor.run { vm.draft.selectedLocalModel?.model = "new" }
+        let fresh = Task { await vm.checkHealth() }; await transport.waitForRequests(2)
+        transport.finish(1, models: ["fresh"]); await fresh
+        transport.finish(0, models: ["stale"]); await old
+        let freshHealth = await MainActor.run { vm.health }; XCTAssertEqual(freshHealth, .healthy(["fresh"]))
+
+        await MainActor.run { vm.draft.selectedLocalModel = model }
+        let cancelled = Task { await vm.checkHealth() }; await transport.waitForRequests(3)
+        await vm.cancel(); transport.finish(2, models: ["stale"]); await cancelled
+        let cancelledHealth = await MainActor.run { vm.health }; XCTAssertEqual(cancelledHealth, .idle)
+
+        await MainActor.run { vm.draft.selectedLocalModel = model }
+        let reset = Task { await vm.checkHealth() }; await transport.waitForRequests(4)
+        await vm.reset(); transport.finish(3, models: ["stale"]); await reset
+        let resetHealth = await MainActor.run { vm.health }; XCTAssertEqual(resetHealth, .idle)
     }
     private func temporaryDirectory() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
 }
@@ -114,22 +158,35 @@ private final class MemoryPersistence: RTCSettingsPersistence, @unchecked Sendab
     func load() throws -> RTCSettings { value }; func save(_ settings: RTCSettings) throws { value = settings }; func reset() throws { value = .default }
 }
 private final class FailingPersistence: RTCSettingsPersistence, @unchecked Sendable {
-    private let lock = NSLock(); private var value: RTCSettings; private let failSave: Bool; private let failLoad: Bool
-    init(value: RTCSettings, failSave: Bool = false, failLoad: Bool = false) { self.value = value; self.failSave = failSave; self.failLoad = failLoad }
+    private let lock = NSLock(); private var value: RTCSettings; private let failSave: Bool; private let failLoad: Bool; private let failReset: Bool
+    init(value: RTCSettings, failSave: Bool = false, failLoad: Bool = false, failReset: Bool = false) { self.value = value; self.failSave = failSave; self.failLoad = failLoad; self.failReset = failReset }
     func load() throws -> RTCSettings { lock.lock(); defer { lock.unlock() }; if failLoad { throw RTCSettingsError.invalidStoredSettings }; return value }
     func save(_ settings: RTCSettings) throws { if failSave { throw RTCSettingsError.persistenceFailure }; lock.lock(); defer { lock.unlock() }; value = settings }
-    func reset() throws { lock.lock(); defer { lock.unlock() }; value = .default }
+    func reset() throws { if failReset { throw RTCSettingsError.persistenceFailure }; lock.lock(); defer { lock.unlock() }; value = .default }
 }
 private actor RecordingLifecycle: AppLifecycleService {
     private var calls = [Bool]()
+    private var state: Bool
     private let failCalls: Set<Bool>
-    init(failCalls: Set<Bool> = []) { self.failCalls = failCalls }
+    init(enabled: Bool = false, failCalls: Set<Bool> = []) { self.state = enabled; self.failCalls = failCalls }
     func activate(reviewID: ReviewID?) async {}
-    func launchAtLogin(enabled: Bool) async throws { calls.append(enabled); if failCalls.contains(enabled) { throw RTCSettingsError.persistenceFailure } }
+    func launchAtLogin(enabled: Bool) async throws { calls.append(enabled); if failCalls.contains(enabled) { throw RTCSettingsError.persistenceFailure }; state = enabled }
+    func launchAtLoginEnabled() async -> Bool { state }
     func values() -> [Bool] { calls }
+    func enabled() -> Bool { state }
 }
+private final class ErrorCollector: @unchecked Sendable { private let lock = NSLock(); private var errors = [Error](); func append(_ error: Error) { lock.lock(); defer { lock.unlock() }; errors.append(error) }; func values() -> [Error] { lock.lock(); defer { lock.unlock() }; return errors } }
 private actor RecordingPermissionRequester: NotificationPermissionRequester {
     private var requests = 0
     func requestPermissionIfNeeded() async throws -> NotificationAuthorization { requests += 1; return .authorized }
     func count() -> Int { requests }
+}
+private final class DelayedTransport: ModelHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock(); private var continuations = [AsyncThrowingStream<Data, Error>.Continuation]()
+    func send(_ request: URLRequest, limits: ModelLimits) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in lock.lock(); continuations.append(continuation); lock.unlock() }
+    }
+    func waitForRequests(_ expected: Int) async { while count() < expected { await Task.yield() } }
+    func finish(_ index: Int, models: [String]) { lock.lock(); let continuation = continuations[index]; lock.unlock(); continuation.yield(try! JSONSerialization.data(withJSONObject: ["models": models.map { ["name": $0] }])); continuation.finish() }
+    private func count() -> Int { lock.lock(); defer { lock.unlock() }; return continuations.count }
 }

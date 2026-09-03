@@ -132,7 +132,7 @@ public struct SyntaxSpan: Codable, Hashable, Sendable { public let line: Int, st
 public protocol SyntaxHighlighter: Sendable { func highlight(path: String, fileDigest: SHA256Digest, source: String, language: BoundedString?, lines: Range<Int>?) async throws -> [SyntaxSpan]; func cancel(fileDigest: SHA256Digest) async }
 public protocol WakeSink: Sendable { func wake(reviewID: ReviewID, conversationID: UUID, highestSequence: Int) async throws }
 public protocol NotificationService: Sendable { func notify(reviewID: ReviewID, generic: Bool) async throws }
-public protocol AppLifecycleService: Sendable { func activate(reviewID: ReviewID?) async; func launchAtLogin(enabled: Bool) async throws }
+public protocol AppLifecycleService: Sendable { func activate(reviewID: ReviewID?) async; func launchAtLogin(enabled: Bool) async throws; func launchAtLoginEnabled() async -> Bool }
 
 public enum RTCCanonicalJSON {
     public static func encode<T: Encodable>(_ value: T) throws -> Data { let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]; encoder.dateEncodingStrategy = .iso8601; return try encoder.encode(value) }
