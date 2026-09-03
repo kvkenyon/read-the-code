@@ -1,0 +1,6 @@
+{
+  "authorization": ["notDetermined", "denied", "provisional", "authorized"],
+  "delivery": ["foreground", "background", "duplicate-review"],
+  "lifecycle": ["no-windows-resident", "url-review-route", "login-registration-error"],
+  "privacy": { "genericByDefault": true, "privatePreviewRequiresOptIn": true }
+}
