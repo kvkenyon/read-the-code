@@ -1,0 +1,11 @@
+{
+  "fixture": "rtc-105-large-review",
+  "purpose": "100000-row virtualization and snapshot-restoration fixture",
+  "files": 2,
+  "rows": 100000,
+  "expected": {
+    "one_view_per_visible_row": true,
+    "selection_survives_snapshot": true,
+    "inline_thread_insertion_preserves_anchor": true
+  }
+}
