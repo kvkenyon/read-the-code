@@ -1,12 +1,47 @@
 {
   "schemaVersion": 2,
   "id": "00000000-0000-0000-0000-000000000108",
-  "revision": {"repositoryPath":"/tmp/repo","baseSHA":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSHA":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-  "producer":"localModel",
-  "inputDigest":"0000000000000000000000000000000000000000000000000000000000000000",
-  "title":"Validated tour",
-  "overview":[{"paragraph":{"_0":{"runs":[{"kind":"plain","text":"Exact committed-tree review."}]}}}],
-  "reviewFocuses":[],
-  "chapters":[{"id":"behavior","title":"Behavior","summary":{"runs":[{"kind":"plain","text":"Behavior changed."}]},"anchors":[{"revision":{"repositoryPath":"/tmp/repo","baseSHA":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSHA":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"path":"Sources/App.swift","scope":"file","side":null,"startLine":null,"endLine":null,"startContextHash":null,"endContextHash":null,"hunkIndex":null,"symbol":null}],"blocks":[]}],
-  "risks":[]
+  "revision": {
+    "repositoryPath": "/tmp/repo",
+    "baseSHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "headSHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "producer": "localModel",
+  "inputDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "title": "Validated tour",
+  "overview": [
+    {
+      "paragraph": {
+        "_0": { "runs": [{ "kind": "plain", "text": "Exact committed-tree review." }] }
+      }
+    }
+  ],
+  "reviewFocuses": [],
+  "chapters": [
+    {
+      "id": "behavior",
+      "title": "Behavior",
+      "summary": { "runs": [{ "kind": "plain", "text": "Behavior changed." }] },
+      "anchors": [
+        {
+          "revision": {
+            "repositoryPath": "/tmp/repo",
+            "baseSHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "headSHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "path": "Sources/App.swift",
+          "scope": "file",
+          "side": null,
+          "startLine": null,
+          "endLine": null,
+          "startContextHash": null,
+          "endContextHash": null,
+          "hunkIndex": null,
+          "symbol": null
+        }
+      ],
+      "blocks": []
+    }
+  ],
+  "risks": []
 }
