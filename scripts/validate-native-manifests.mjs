@@ -40,7 +40,6 @@ const expectedDependencies = {
   RTCModelAdapterTests: ['RTCContracts', 'RTCModelAdapters'],
   RTCStoreTests: ['RTCStore'],
   RTCWorkspaceShellTests: ['RTCWorkspaceShell'],
-  RTCManifestTests: [],
   RTCCLITests: ['RTCCLI'],
   RTCContractTests: ['RTCContracts', 'RTCTestSupport'],
   RTCDiagramTests: ['RTCContracts', 'RTCDiagram'],
@@ -124,6 +123,15 @@ for (const [name, expected] of Object.entries(expectedDependencies)) {
   }
 }
 
+for (const worker of ['GitWorker', 'ModelWorker']) {
+  if (packageTargets.get(worker).type !== 'regular') {
+    fail(`SwiftPM target ${worker} must remain a source-only library target`);
+  }
+  if (projectType(targetBlock(worker, project)) !== 'framework') {
+    fail(`XcodeGen target ${worker} must remain a source-only framework target`);
+  }
+}
+
 for (const root of ['Sources', 'Tests']) {
   const directory = path.join(repositoryRoot, 'native', root);
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -139,7 +147,6 @@ for (const [directory, packageType, xcodeType] of [
   ['RTCAgentChatTests', 'test', 'bundle.unit-test'],
   ['RTCDesignTests', 'test', 'bundle.unit-test'],
   ['RTCGitTests', 'test', 'bundle.unit-test'],
-  ['RTCManifestTests', 'test', 'bundle.unit-test'],
   ['RTCModelAdapterTests', 'test', 'bundle.unit-test'],
   ['RTCStoreTests', 'test', 'bundle.unit-test'],
   ['RTCWorkspaceShellTests', 'test', 'bundle.unit-test'],

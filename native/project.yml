@@ -56,29 +56,21 @@ targets:
     entitlements:
       path: CLI/rtc.entitlements
   GitWorker:
-    type: xpc-service
+    type: framework
     platform: macOS
     sources:
       - Services/GitWorker
     dependencies:
       - target: RTCContracts
       - target: RTCGit
-    settings:
-      PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app.gitworker
-    entitlements:
-      path: Services/GitWorker.entitlements
   ModelWorker:
-    type: xpc-service
+    type: framework
     platform: macOS
     sources:
       - Services/ModelWorker
     dependencies:
       - target: RTCContracts
       - target: RTCModelAdapters
-    settings:
-      PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app.modelworker
-    entitlements:
-      path: Services/ModelWorker.entitlements
 
   RTCContracts:
     type: framework
@@ -271,12 +263,6 @@ targets:
       - Tests/RTCWorkspaceShellTests
     dependencies:
       - target: RTCWorkspaceShell
-  RTCManifestTests:
-    type: bundle.unit-test
-    platform: macOS
-    sources:
-      - Tests/RTCManifestTests
-
   RTCCLITests:
     type: tool
     platform: macOS

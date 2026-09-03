@@ -155,23 +155,32 @@ public struct IPCClient: Sendable {
         withUnsafeMutableBytes(of: &address.sun_path) { raw in raw.copyBytes(from: bytes) }
         let length = socklen_t(MemoryLayout<sa_family_t>.size + bytes.count)
         guard withUnsafePointer(to: &address, { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, length) } }) == 0 else { throw IPCTransportError.unavailable }
+        try configureSocket(fd, timeout: timeout)
         let frame = try IPCFrameCodec.encode(request)
-        try writeAll(fd, frame, timeout: timeout)
-        var prefix = Data(count: 4); try readAll(fd, into: &prefix, timeout: timeout)
+        try writeAll(fd, frame)
+        var prefix = Data(count: 4); try readAll(fd, into: &prefix)
         let n = Int(prefix[0]) << 24 | Int(prefix[1]) << 16 | Int(prefix[2]) << 8 | Int(prefix[3])
         guard n <= IPCConstants.maxFrameBytes else { throw IPCFrameError.oversize(n) }
-        var payload = Data(count: n); try readAll(fd, into: &payload, timeout: timeout)
+        var payload = Data(count: n); try readAll(fd, into: &payload)
         return try IPCFrameCodec.decodeJSON(IPCEnvelopeResponse.self, from: payload)
     }
-    private func writeAll(_ fd: Int32, _ data: Data, timeout: TimeInterval) throws { try data.withUnsafeBytes { raw in var offset = 0; while offset < data.count { let n = write(fd, raw.baseAddress!.advanced(by: offset), data.count - offset); guard n > 0 else { throw IPCTransportError.writeFailed }; offset += n } } }
-    private func readAll(_ fd: Int32, into data: inout Data, timeout: TimeInterval) throws { let count = data.count; try data.withUnsafeMutableBytes { raw in var offset = 0; while offset < count { let n = read(fd, raw.baseAddress!.advanced(by: offset), count - offset); guard n > 0 else { throw IPCFrameError.truncated }; offset += n } } }
+    private func writeAll(_ fd: Int32, _ data: Data) throws { try data.withUnsafeBytes { raw in var offset = 0; while offset < data.count { let n = SocketWrite(fd, raw.baseAddress!.advanced(by: offset), data.count - offset); guard n > 0 else { throw IPCTransportError.writeFailed }; offset += n } } }
+    private func readAll(_ fd: Int32, into data: inout Data) throws { let count = data.count; try data.withUnsafeMutableBytes { raw in var offset = 0; while offset < count { let n = DarwinOrGlibc(fd, raw.baseAddress!.advanced(by: offset), count - offset); guard n > 0 else { throw IPCFrameError.truncated }; offset += n } } }
 }
 
 public final class IPCServer: @unchecked Sendable {
+    private static let hardClientLimit = 16
     private let path: String; private let dispatcher: IPCDispatcher; private var listener: Int32 = -1
+    private let timeout: TimeInterval
+    private let inFlightSlots: DispatchSemaphore
     private let acceptQueue = DispatchQueue(label: "com.readthecode.ipc.accept", qos: .userInitiated)
     private let clientQueue = DispatchQueue(label: "com.readthecode.ipc.client", qos: .userInitiated, attributes: .concurrent)
-    public init(socketPath: String, dispatcher: IPCDispatcher) { self.path = socketPath; self.dispatcher = dispatcher }
+    public init(socketPath: String, dispatcher: IPCDispatcher, maximumInFlightClients: Int = 16, timeout: TimeInterval = 8) {
+        self.path = socketPath
+        self.dispatcher = dispatcher
+        self.timeout = timeout
+        self.inFlightSlots = DispatchSemaphore(value: min(max(1, maximumInFlightClients), Self.hardClientLimit))
+    }
     public func start() throws {
         #if canImport(Darwin)
         listener = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -189,9 +198,36 @@ public final class IPCServer: @unchecked Sendable {
         acceptQueue.async { [weak self] in self?.acceptLoop() }
     }
     public func stop() { if listener >= 0 { shutdown(listener, Int32(SHUT_RDWR)); close(listener); listener = -1; unlink(path) } }
-    private func acceptLoop() { while listener >= 0 { let client = accept(listener, nil, nil); guard client >= 0 else { continue }; clientQueue.async { [weak self] in self?.serve(client) } } }
-    private func serve(_ fd: Int32) { defer { close(fd) }; var prefix = Data(count: 4); do { try read(fd, &prefix); let n = Int(prefix[0]) << 24 | Int(prefix[1]) << 16 | Int(prefix[2]) << 8 | Int(prefix[3]); guard n <= IPCConstants.maxFrameBytes else { return }; var payload = Data(count: n); try read(fd, &payload); var frame = prefix; frame.append(payload); let response = Task { await dispatcher.dispatch(frame: frame, fileDescriptor: fd) }; let result = try awaitResult(response); _ = result.withUnsafeBytes { write(fd, $0.baseAddress!, result.count) } } catch {} }
+    private func acceptLoop() {
+        while listener >= 0 {
+            inFlightSlots.wait()
+            guard listener >= 0 else { inFlightSlots.signal(); return }
+            let client = accept(listener, nil, nil)
+            guard client >= 0 else { inFlightSlots.signal(); continue }
+            clientQueue.async {
+                defer { self.inFlightSlots.signal() }
+                self.serve(client)
+            }
+        }
+    }
+    private func serve(_ fd: Int32) {
+        defer { close(fd) }
+        var prefix = Data(count: 4)
+        do {
+            try configureSocket(fd, timeout: timeout)
+            try read(fd, &prefix)
+            let n = Int(prefix[0]) << 24 | Int(prefix[1]) << 16 | Int(prefix[2]) << 8 | Int(prefix[3])
+            guard n <= IPCConstants.maxFrameBytes else { return }
+            var payload = Data(count: n)
+            try read(fd, &payload)
+            var frame = prefix
+            frame.append(payload)
+            let response = Task { await dispatcher.dispatch(frame: frame, fileDescriptor: fd) }
+            try write(fd, try awaitResult(response))
+        } catch {}
+    }
     private func read(_ fd: Int32, _ data: inout Data) throws { let count = data.count; try data.withUnsafeMutableBytes { raw in var i = 0; while i < count { let n = DarwinOrGlibc(fd, raw.baseAddress!.advanced(by: i), count - i); guard n > 0 else { throw IPCFrameError.truncated }; i += n } } }
+    private func write(_ fd: Int32, _ data: Data) throws { try data.withUnsafeBytes { raw in var offset = 0; while offset < data.count { let n = SocketWrite(fd, raw.baseAddress!.advanced(by: offset), data.count - offset); guard n > 0 else { throw IPCTransportError.writeFailed }; offset += n } } }
     private func awaitResult(_ task: Task<Data, Never>) throws -> Data {
         let semaphore = DispatchSemaphore(value: 0)
         let result = LockedIPCData()
@@ -223,9 +259,28 @@ private final class LockedIPCData: @unchecked Sendable {
 
 #if canImport(Darwin)
 private func DarwinOrGlibc(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> Int { Darwin.read(fd, buffer, count) }
+private func SocketWrite(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int { Darwin.write(fd, buffer, count) }
 #else
 private func DarwinOrGlibc(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> Int { Glibc.read(fd, buffer, count) }
+private func SocketWrite(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int { Glibc.write(fd, buffer, count) }
 #endif
+
+private func configureSocket(_ fd: Int32, timeout: TimeInterval) throws {
+    let seconds = timeout.isFinite ? min(max(timeout, 0.001), TimeInterval(Int32.max)) : 8
+    var value = timeval()
+    value.tv_sec = Int(seconds)
+    value.tv_usec = Int32((seconds - floor(seconds)) * 1_000_000)
+    let size = socklen_t(MemoryLayout<timeval>.size)
+    guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, size) == 0,
+          setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &value, size) == 0
+    else { throw IPCTransportError.unavailable }
+    #if canImport(Darwin)
+    var noSignal: Int32 = 1
+    guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+        throw IPCTransportError.unavailable
+    }
+    #endif
+}
 
 public struct SpoolTransport: Sendable {
     public let directory: URL
