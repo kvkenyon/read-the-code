@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 2,
+  "framing": "uint32-big-endian-length-plus-canonical-utf8-json",
+  "limits": { "maxFrameBytes": 4194304, "maxTourBytes": 1048576 },
+  "errors": ["UNSUPPORTED_PROTOCOL", "UNAUTHORIZED", "INVALID_ARGUMENT", "APP_UNAVAILABLE"]
+}
