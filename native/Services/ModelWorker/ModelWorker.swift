@@ -1,5 +1,6 @@
 import Foundation
 import RTCContracts
+import RTCModelAdapters
 
 public struct ModelCapabilitySnapshot: Codable, Sendable, Equatable {
     public let kind: ModelAdapterKind, models: [BoundedString], structuredOutput: Bool, healthy: Bool

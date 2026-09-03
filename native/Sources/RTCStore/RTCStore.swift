@@ -60,7 +60,8 @@ public actor SQLiteStore {
     }
 
     public func publish(_ snapshot: StoreSnapshot) {
-        for continuation in observations[snapshot.review.id]?.values ?? [] { continuation.yield(snapshot) }
+        guard let continuations = observations[snapshot.review.id]?.values else { return }
+        for continuation in continuations { continuation.yield(snapshot) }
     }
 
     private func removeObservation(_ id: ReviewID, token: UUID) { observations[id]?[token] = nil }
@@ -89,7 +90,7 @@ public actor SQLiteStore {
         }
     }
 
-    private static func protect(_ url: URL, mode: Int16) throws {
+    private static func protect(_ url: URL, mode: mode_t) throws {
         guard chmod(url.path, mode) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EACCES) }
     }
 }
@@ -175,27 +176,31 @@ public final class JobQueue: JobRepository, @unchecked Sendable {
 
 public final class BlobStore: @unchecked Sendable {
     public let rootURL: URL
-    public init(rootURL: URL) throws { self.rootURL = rootURL.appendingPathComponent("blobs/sha256", isDirectory: true); try FileManager.default.createDirectory(at: self.rootURL, withIntermediateDirectories: true); try chmod(self.rootURL.path, 0o700) }
-    public func put(_ data: Data) throws -> SHA256Digest {
-        let digest = SHA256Digest(data: data); let dir = rootURL.appendingPathComponent(String(digest.hex.prefix(2)), isDirectory: true); try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    public init(rootURL: URL) throws { self.rootURL = rootURL.appendingPathComponent("blobs/sha256", isDirectory: true); try FileManager.default.createDirectory(at: self.rootURL, withIntermediateDirectories: true); try Self.protect(self.rootURL, mode: 0o700) }
+    public func put(_ data: Data) throws -> RTCContracts.SHA256Digest {
+        let digest = RTCContracts.SHA256Digest(data: data); let dir = rootURL.appendingPathComponent(String(digest.hex.prefix(2)), isDirectory: true); try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let target = dir.appendingPathComponent(digest.hex + ".rtcb"); if FileManager.default.fileExists(atPath: target.path) { return digest }
-        let temp = dir.appendingPathComponent(".tmp-\(UUID().uuidString)"); try data.write(to: temp, options: [.atomic]); try chmod(temp.path, 0o600); let fd = open(temp.path, O_RDONLY); if fd >= 0 { _ = fsync(fd); close(fd) }
-        do { try FileManager.default.moveItem(at: temp, to: target); try chmod(target.path, 0o600) } catch CocoaError.fileWriteFileExists { try? FileManager.default.removeItem(at: temp) }
+        let temp = dir.appendingPathComponent(".tmp-\(UUID().uuidString)"); try data.write(to: temp, options: [.atomic]); try Self.protect(temp, mode: 0o600); let fd = open(temp.path, O_RDONLY); if fd >= 0 { _ = fsync(fd); close(fd) }
+        do { try FileManager.default.moveItem(at: temp, to: target); try Self.protect(target, mode: 0o600) } catch CocoaError.fileWriteFileExists { try? FileManager.default.removeItem(at: temp) }
         return digest
     }
-    public func get(_ digest: SHA256Digest) throws -> Data { let data = try Data(contentsOf: rootURL.appendingPathComponent(String(digest.hex.prefix(2))).appendingPathComponent(digest.hex + ".rtcb")); guard SHA256Digest(data: data) == digest else { throw RTCStoreError.invalidBlob }; return data }
+    public func get(_ digest: RTCContracts.SHA256Digest) throws -> Data { let data = try Data(contentsOf: rootURL.appendingPathComponent(String(digest.hex.prefix(2))).appendingPathComponent(digest.hex + ".rtcb")); guard RTCContracts.SHA256Digest(data: data) == digest else { throw RTCStoreError.invalidBlob }; return data }
 
     @discardableResult
-    public func collectOrphans(referenced: Set<SHA256Digest>, olderThan cutoff: Date = Date().addingTimeInterval(-24 * 60 * 60)) throws -> Int {
+    public func collectOrphans(referenced: Set<RTCContracts.SHA256Digest>, olderThan cutoff: Date = Date().addingTimeInterval(-24 * 60 * 60)) throws -> Int {
         var removed = 0
         for prefix in try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey]) {
             guard (try? prefix.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             for file in try FileManager.default.contentsOfDirectory(at: prefix, includingPropertiesForKeys: [.contentModificationDateKey]) where file.pathExtension == "rtcb" {
-                guard let digest = try? SHA256Digest(String(file.deletingPathExtension().lastPathComponent)), !referenced.contains(digest), let date = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate, date < cutoff else { continue }
+                guard let digest = try? RTCContracts.SHA256Digest(String(file.deletingPathExtension().lastPathComponent)), !referenced.contains(digest), let date = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate, date < cutoff else { continue }
                 try FileManager.default.removeItem(at: file); removed += 1
             }
         }
         return removed
+    }
+
+    private static func protect(_ url: URL, mode: mode_t) throws {
+        guard chmod(url.path, mode) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EACCES) }
     }
 }
 
