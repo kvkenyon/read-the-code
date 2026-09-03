@@ -94,6 +94,9 @@ public final class ReviewWorkspaceModel: ObservableObject {
     }
 
     public func markViewed(_ path: String, viewed: Bool = true) async throws { guard !isReadOnly else { throw RTCDomainError.readOnly }; try await handler.markViewed(path: path, viewed: viewed); await refresh() }
+    public func resolve(_ threadID: UUID) async throws { _ = try await handler.resolve(threadID: threadID); await refresh() }
+    public func reopen(_ threadID: UUID) async throws { _ = try await handler.reopen(threadID: threadID); await refresh() }
+    public func reply(_ threadID: UUID, body: String) async throws { try await handler.reply(threadID: threadID, body: try richText(body)); await refresh() }
     public func sendDrafts() async throws -> ReviewDomainEvent { let event = try await handler.sendReview(threadIDs: threads.filter { $0.state == .draft }.map(\.id)); await refresh(); return event }
     public func requestChanges(summary: String) async throws -> ReviewDomainEvent {
         let rich = summary.isEmpty ? nil : try richText(summary)
@@ -180,7 +183,24 @@ public struct RTCReviewWorkspaceView: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search comments", text: $model.commentQuery).textFieldStyle(.roundedBorder)
             Picker("Thread filter", selection: $model.threadFilter) { ForEach(ReviewWorkspaceModel.ThreadFilter.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) } }.labelsHidden().pickerStyle(.segmented)
-            ScrollView { LazyVStack(alignment: .leading, spacing: 8) { ForEach(model.filteredThreads, id: \.id) { thread in RTCCard { VStack(alignment: .leading, spacing: 6) { HStack { RTCBadge(thread.state.rawValue); Spacer(); Text(thread.anchor.path).font(.caption).lineLimit(1) }; Text(thread.latestMessage?.body.runs.map(\.text.value).joined() ?? "").font(.subheadline); Text("Line \(thread.anchor.startLine ?? 0)").font(.caption).foregroundStyle(RTCDesign.color(.textSecondary)) } } } } }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.filteredThreads, id: \.id) { thread in
+                        RTCCard {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack { RTCBadge(thread.state.rawValue); Spacer(); Text(thread.anchor.path).font(.caption).lineLimit(1) }
+                                Text(thread.latestMessage?.body.runs.map(\.text.value).joined() ?? "").font(.subheadline)
+                                Text("Line \(thread.anchor.startLine ?? 0)").font(.caption).foregroundStyle(RTCDesign.color(.textSecondary))
+                                HStack {
+                                    Button("Reply") { perform { try await model.reply(thread.id, body: "Reply") } }.disabled(model.isReadOnly || thread.state == .resolved)
+                                    if thread.state == .resolved { Button("Reopen") { perform { try await model.reopen(thread.id) } } }
+                                    else if thread.state == .open { Button("Resolve") { perform { try await model.resolve(thread.id) } } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }.padding(10).background(RTCDesign.color(.canvas)).accessibilityLabel("Comments")
     }
 }

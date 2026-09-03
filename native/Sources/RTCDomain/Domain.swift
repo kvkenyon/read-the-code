@@ -19,7 +19,7 @@ public struct ReviewRevisionState: Equatable, Sendable {
     }
 
     public mutating func markHead(_ headSHA: String) {
-        stale = headSHA.lowercased() != revision.headSHA
+        stale = stale || headSHA.lowercased() != revision.headSHA
     }
 
     public mutating func transition(to next: ReviewStatus) throws {
