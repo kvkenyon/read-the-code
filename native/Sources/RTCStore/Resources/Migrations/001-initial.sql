@@ -1,0 +1,12 @@
+CREATE TABLE reviews (id TEXT PRIMARY KEY, repo_path TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, payload BLOB NOT NULL, updated_at REAL NOT NULL);
+CREATE TABLE review_events (review_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(review_id, sequence));
+CREATE TABLE jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, review_id TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL, available_at REAL NOT NULL, lease_owner TEXT, lease_expires REAL);
+CREATE TABLE review_files (review_id TEXT NOT NULL, path TEXT NOT NULL, blob_digest TEXT, ordinal INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(review_id, path));
+CREATE TABLE threads (id TEXT PRIMARY KEY, review_id TEXT NOT NULL, payload BLOB NOT NULL, updated_at REAL NOT NULL);
+CREATE TABLE thread_messages (thread_id TEXT NOT NULL, sequence INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(thread_id, sequence));
+CREATE TABLE file_progress (review_id TEXT NOT NULL, path TEXT NOT NULL, viewed INTEGER NOT NULL, viewed_at REAL, version INTEGER NOT NULL, PRIMARY KEY(review_id, path));
+CREATE TABLE tour_documents (review_id TEXT NOT NULL, tour_id TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(review_id, tour_id));
+CREATE TABLE tour_runs (id TEXT PRIMARY KEY, review_id TEXT NOT NULL, payload BLOB NOT NULL);
+CREATE TABLE conversations (id TEXT PRIMARY KEY, review_id TEXT NOT NULL, payload BLOB NOT NULL);
+CREATE TABLE conversation_events (conversation_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL, PRIMARY KEY(conversation_id, sequence));
+CREATE TABLE settings (key TEXT PRIMARY KEY, value BLOB NOT NULL);
