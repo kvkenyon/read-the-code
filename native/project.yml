@@ -1,7 +1,7 @@
 name: ReadTheCode
 options:
   deploymentTarget:
-    macOS: "14.0"
+    macOS: '14.0'
   createIntermediateGroups: true
   defaultConfig: Debug
 configs:
@@ -9,9 +9,9 @@ configs:
   Release: release
 settings:
   base:
-    SWIFT_VERSION: "6.0"
-    MACOSX_DEPLOYMENT_TARGET: "14.0"
-    DEVELOPMENT_TEAM: ""
+    SWIFT_VERSION: '6.0'
+    MACOSX_DEPLOYMENT_TARGET: '14.0'
+    DEVELOPMENT_TEAM: ''
     CODE_SIGN_STYLE: Manual
     SWIFT_STRICT_CONCURRENCY: complete
   configs:
@@ -22,49 +22,134 @@ targets:
     type: application
     platform: macOS
     sources: []
-    dependencies: [{target: RTCContracts}, {target: RTCDomain}, {target: RTCStore}, {target: RTCIPC}, {target: RTCReview}, {target: RTCDesign}, {target: RTCLifecycle}]
+    dependencies:
+      [
+        { target: RTCContracts },
+        { target: RTCDomain },
+        { target: RTCStore },
+        { target: RTCIPC },
+        { target: RTCReview },
+        { target: RTCDesign },
+        { target: RTCLifecycle },
+      ]
     settings: { PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app }
-    entitlements: {path: Configs/ReadTheCode.entitlements}
+    entitlements: { path: Configs/ReadTheCode.entitlements }
   rtc:
     type: tool
     platform: macOS
     sources: []
-    dependencies: [{target: RTCContracts}, {target: RTCIPC}]
+    dependencies: [{ target: RTCContracts }, { target: RTCIPC }]
     settings: { PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.rtc }
   GitWorker:
     type: xpc-service
     platform: macOS
     sources: []
-    dependencies: [{target: RTCContracts}, {target: RTCGit}]
+    dependencies: [{ target: RTCContracts }, { target: RTCGit }]
     settings: { PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app.gitworker }
   ModelWorker:
     type: xpc-service
     platform: macOS
     sources: []
-    dependencies: [{target: RTCContracts}, {target: RTCModelAdapters}]
+    dependencies: [{ target: RTCContracts }, { target: RTCModelAdapters }]
     settings: { PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app.modelworker }
   RTCContracts:
     type: framework
     platform: macOS
     sources: [Sources/RTCContracts]
-  RTCDomain: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCStore: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCDomain}] }
-  RTCIPC: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCGit: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCDomain}] }
-  RTCSyntax: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCDiffCanvas: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCDiagram: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCTour: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCDiagram}] }
-  RTCModelAdapters: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCAgentChat: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCReview: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCDomain}] }
-  RTCDesign: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCLifecycle: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCExport: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}] }
-  RTCIngest: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCStore}, {target: RTCGit}] }
-  RTCWorkspaceShell: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCDesign}] }
-  RTCTourIntegration: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCTour}] }
-  RTCAgentChatIntegration: { type: framework, platform: macOS, sources: [], dependencies: [{target: RTCContracts}, {target: RTCAgentChat}] }
-  RTCContractTests: { type: bundle.unit-test, platform: macOS, sources: [Tests/RTCContractTests], dependencies: [{target: RTCContracts}] }
-  RTCTestSupport: { type: framework, platform: macOS, sources: [Tests/RTCTestSupport], dependencies: [{target: RTCContracts}] }
-  RTCUITests: { type: bundle.ui-testing, platform: macOS, sources: [], dependencies: [{target: ReadTheCode}] }
+  RTCDomain:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCStore:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCDomain }],
+    }
+  RTCIPC:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCGit:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCDomain }],
+    }
+  RTCSyntax:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCDiffCanvas:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCDiagram:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCTour:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCDiagram }],
+    }
+  RTCModelAdapters:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCAgentChat:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCReview:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCDomain }],
+    }
+  RTCDesign:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCLifecycle:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCExport:
+    { type: framework, platform: macOS, sources: [], dependencies: [{ target: RTCContracts }] }
+  RTCIngest:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCStore }, { target: RTCGit }],
+    }
+  RTCWorkspaceShell:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCDesign }],
+    }
+  RTCTourIntegration:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCTour }],
+    }
+  RTCAgentChatIntegration:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: RTCContracts }, { target: RTCAgentChat }],
+    }
+  RTCContractTests:
+    {
+      type: bundle.unit-test,
+      platform: macOS,
+      sources: [Tests/RTCContractTests],
+      dependencies: [{ target: RTCContracts }],
+    }
+  RTCTestSupport:
+    {
+      type: framework,
+      platform: macOS,
+      sources: [Tests/RTCTestSupport],
+      dependencies: [{ target: RTCContracts }],
+    }
+  RTCUITests:
+    {
+      type: bundle.ui-testing,
+      platform: macOS,
+      sources: [],
+      dependencies: [{ target: ReadTheCode }],
+    }
