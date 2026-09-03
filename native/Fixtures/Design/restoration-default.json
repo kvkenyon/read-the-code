@@ -1,1 +1,7 @@
-{"agentPinned":false,"collapsed":[],"mode":"tour","version":1,"widths":{"agent":380,"canvas":680,"comments":340,"story":250}}
+{
+  "agentPinned": false,
+  "collapsed": [],
+  "mode": "tour",
+  "version": 1,
+  "widths": { "agent": 380, "canvas": 680, "comments": 340, "story": 250 }
+}
