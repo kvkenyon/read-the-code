@@ -19,6 +19,7 @@ for test_target in \
     RTCIPCTests \
     RTCLifecycleTests \
     RTCReviewTests \
+    RTCReviewWorkspaceFeatureTests \
     RTCSyntaxTests \
     RTCTourTests \
     TourWorkspaceFeatureTests

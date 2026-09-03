@@ -20,6 +20,7 @@ let libraryTargets = [
     "RTCLifecycle",
     "RTCSettings",
     "RTCWorkspaceShell",
+    "RTCReviewWorkspace",
     "RTCCLI",
     "GitWorker",
     "ModelWorker",
@@ -79,6 +80,7 @@ let package = Package(
         .target(name: "RTCLifecycle", dependencies: ["RTCContracts"]),
         .target(name: "RTCSettings", dependencies: ["RTCContracts", "RTCModelAdapters", "RTCLifecycle"]),
         .target(name: "RTCWorkspaceShell", dependencies: ["RTCDesign"]),
+        .target(name: "RTCReviewWorkspace", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCSyntax", "RTCDiffCanvas", "RTCDesign", "RTCWorkspaceShell"]),
         .target(
             name: "RTCCLI",
             dependencies: ["RTCIPC"],
@@ -156,5 +158,6 @@ let package = Package(
             ],
             path: "Tests/TourWorkspaceFeatureTests"
         ),
+        .executableTarget(name: "RTCReviewWorkspaceFeatureTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCDiffCanvas", "RTCReviewWorkspace"], path: "Tests/RTCReviewWorkspaceFeatureTests"),
     ]
 )

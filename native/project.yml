@@ -200,6 +200,19 @@ targets:
       - Sources/RTCWorkspaceShell
     dependencies:
       - target: RTCDesign
+  RTCReviewWorkspace:
+    type: framework
+    platform: macOS
+    sources:
+      - Sources/RTCReviewWorkspace
+    dependencies:
+      - target: RTCContracts
+      - target: RTCDomain
+      - target: RTCReview
+      - target: RTCSyntax
+      - target: RTCDiffCanvas
+      - target: RTCDesign
+      - target: RTCWorkspaceShell
   RTCTourIntegration:
     type: framework
     platform: macOS
@@ -392,6 +405,17 @@ targets:
       - target: RTCTour
       - target: RTCTourIntegration
       - target: TourWorkspace
+  RTCReviewWorkspaceFeatureTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/RTCReviewWorkspaceFeatureTests
+    dependencies:
+      - target: RTCContracts
+      - target: RTCDomain
+      - target: RTCReview
+      - target: RTCDiffCanvas
+      - target: RTCReviewWorkspace
   TourWorkspaceUITests:
     type: bundle.ui-testing
     platform: macOS

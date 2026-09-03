@@ -113,8 +113,9 @@ public final class ReviewCanvasController: NSViewController {
     private lazy var dataSource = makeDataSource()
 
     public init() {
-        collectionView = NSCollectionView()
+        collectionView = ReviewCanvasCollectionView()
         super.init(nibName: nil, bundle: nil)
+        (collectionView as? ReviewCanvasCollectionView)?.reviewCanvas = self
     }
 
     @available(*, unavailable)
@@ -170,6 +171,13 @@ public final class ReviewCanvasController: NSViewController {
         guard let selection = selected, let line = line(for: selection) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(line.text, forType: .string)
+    }
+
+    /// The canvas keeps keyboard comment creation next to the selected evidence.
+    /// It never creates a thread itself; the workspace owns the domain mutation.
+    public func requestComment() {
+        guard let selected else { return }
+        delegate?.canvas(self, didRequestCommentAt: selected)
     }
 
     private func items(for file: CanvasFile) -> [CanvasItemID] {
@@ -231,7 +239,13 @@ extension ReviewCanvasController: NSCollectionViewDelegate {
               let line = snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == hunkIndex })?.lines[index],
               let side: AnchorSide = line.newLine == nil ? .old : .new,
               let lineNumber = side == .old ? line.oldLine : line.newLine else { return }
-        let newSelection = CanvasSelection(path: path, side: side, startLine: lineNumber, endLine: lineNumber)
+        let extending = NSEvent.modifierFlags.contains(.shift)
+        let newSelection: CanvasSelection
+        if extending, let prior = selected, prior.path == path, prior.side == side {
+            newSelection = CanvasSelection(path: path, side: side, startLine: prior.startLine, endLine: lineNumber)
+        } else {
+            newSelection = CanvasSelection(path: path, side: side, startLine: lineNumber, endLine: lineNumber)
+        }
         selected = newSelection
         delegate?.canvas(self, didSelect: CanvasNavigationEvent(selection: newSelection))
     }
@@ -267,9 +281,21 @@ final class CanvasRowView: NSCollectionViewItem {
             guard let line = snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == hunk })?.lines[index] else { return }
             label.stringValue = "\(line.oldLine.map(String.init) ?? "   ")  \(line.newLine.map(String.init) ?? "   ")  \(line.kind == .addition ? "+" : line.kind == .deletion ? "-" : " ") \(line.text)"
             label.textColor = line.kind == .addition ? .systemGreen : line.kind == .deletion ? .systemRed : .labelColor
+            label.setAccessibilityLabel("\(line.kind.rawValue) line \(line.newLine ?? line.oldLine ?? 0): \(line.text)")
         case .thread: label.stringValue = "  ↳  Add inline comment"
         case .file: label.stringValue = ""
         }
+    }
+}
+
+private final class ReviewCanvasCollectionView: NSCollectionView {
+    weak var reviewCanvas: ReviewCanvasController?
+    override func keyDown(with event: NSEvent) {
+        if event.charactersIgnoringModifiers?.lowercased() == "c", let canvas = reviewCanvas {
+            canvas.requestComment()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 
