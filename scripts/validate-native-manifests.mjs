@@ -8,6 +8,8 @@ const expectedDependencies = {
   ReadTheCode: [
     'RTCContracts',
     'RTCDesign',
+    'RTCInboxFeature',
+    'RTCIngest',
     'RTCDomain',
     'RTCIPC',
     'RTCLifecycle',
@@ -44,6 +46,8 @@ const expectedDependencies = {
   RTCDesign: [],
   RTCLifecycle: ['RTCContracts'],
   RTCSettings: ['RTCContracts', 'RTCModelAdapters', 'RTCLifecycle'],
+  RTCIngest: ['GRDB', 'RTCContracts', 'RTCGit', 'RTCIPC', 'RTCLifecycle', 'RTCStore'],
+  RTCInboxFeature: ['RTCContracts', 'RTCDesign', 'RTCIngest'],
   RTCWorkspaceShell: ['RTCAgentChat', 'RTCContracts', 'RTCDesign'],
   RTCReviewWorkspace: [
     'RTCContracts',
@@ -54,7 +58,7 @@ const expectedDependencies = {
     'RTCSyntax',
     'RTCWorkspaceShell',
   ],
-  RTCCLI: ['RTCIPC'],
+  RTCCLI: ['RTCContracts', 'RTCIngest', 'RTCIPC'],
   RTCTestSupport: ['RTCContracts'],
   RTCAgentChatTests: ['RTCAgentChat', 'RTCContracts'],
   RTCDesignTests: ['RTCDesign'],
@@ -75,6 +79,16 @@ const expectedDependencies = {
   RTCReviewPersistenceTests: ['RTCContracts', 'RTCDomain', 'RTCReview', 'RTCStore'],
   RTCSyntaxTests: ['RTCContracts', 'RTCSyntax'],
   RTCTourTests: ['RTCContracts', 'RTCTour'],
+  RTCIngestTests: [
+    'RTCCLI',
+    'RTCContracts',
+    'RTCGit',
+    'RTCIngest',
+    'RTCIPC',
+    'RTCLifecycle',
+    'RTCStore',
+  ],
+  RTCInboxFeatureTests: ['RTCContracts', 'RTCInboxFeature', 'RTCIngest'],
   TourWorkspaceFeatureTests: [
     'RTCContracts',
     'RTCDiagram',
@@ -205,6 +219,8 @@ for (const [directory, packageType, xcodeType] of [
   ['RTCReviewPersistenceTests', 'executable', 'tool'],
   ['RTCSyntaxTests', 'executable', 'tool'],
   ['RTCTourTests', 'executable', 'tool'],
+  ['RTCIngestTests', 'executable', 'tool'],
+  ['RTCInboxFeatureTests', 'executable', 'tool'],
   ['TourWorkspaceFeatureTests', 'executable', 'tool'],
   ['RTCReviewWorkspaceFeatureTests', 'executable', 'tool'],
 ]) {

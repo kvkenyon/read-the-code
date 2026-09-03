@@ -76,7 +76,7 @@ public actor SQLiteStore {
         try db.writeWithoutTransaction { db in
             try db.execute(
                 sql: "CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, checksum TEXT NOT NULL);")
-            for (id, sql) in [(1, Migration.v1), (2, Migration.v2), (3, Migration.v3)] {
+            for (id, sql) in [(1, Migration.v1), (2, Migration.v2), (3, Migration.v3), (4, Migration.v4)] {
                 let checksum = SHA256.hash(data: Data(sql.utf8)).map { String(format: "%02x", $0) }.joined()
                 let existing = try String.fetchOne(db, sql: "SELECT checksum FROM schema_migrations WHERE id = ?", arguments: [id])
                 if let existing, existing != checksum { throw RTCStoreError.corrupt("migration checksum") }
@@ -366,6 +366,24 @@ public final class JobQueue: JobRepository, @unchecked Sendable {
                 arguments: [state.rawValue, jobID.uuidString])
         }
     }
+
+    public func requeue(reviewID: ReviewID, kind: JobKind, now: Date = Date()) async throws {
+        try await store.write { db in
+            try db.execute(
+                sql: "UPDATE jobs SET state = 'queued', available_at = ?, lease_owner = NULL, lease_expires = NULL WHERE review_id = ? AND kind = ? AND state != 'succeeded'",
+                arguments: [now.timeIntervalSince1970, reviewID.value, kind.rawValue]
+            )
+        }
+    }
+
+    public func reclaimExpired(now: Date = Date()) async throws {
+        try await store.write { db in
+            try db.execute(
+                sql: "UPDATE jobs SET state = 'queued', lease_owner = NULL, lease_expires = NULL, available_at = ? WHERE state = 'running' AND lease_expires <= ?",
+                arguments: [now.timeIntervalSince1970, now.timeIntervalSince1970]
+            )
+        }
+    }
 }
 
 public final class BlobStore: @unchecked Sendable {
@@ -459,5 +477,39 @@ private enum Migration {
         X'' FROM conversation_events GROUP BY conversation_id;
     CREATE TABLE conversation_requests (review_id TEXT NOT NULL, conversation_id TEXT NOT NULL, request_id TEXT NOT NULL, operation TEXT NOT NULL, payload_digest TEXT NOT NULL, response BLOB NOT NULL, first_sequence INTEGER NOT NULL, last_sequence INTEGER NOT NULL, PRIMARY KEY(review_id, conversation_id, request_id), FOREIGN KEY(conversation_id) REFERENCES conversations(id));
     CREATE INDEX conversation_requests_lookup ON conversation_requests(review_id, conversation_id, request_id);
+    """
+
+    static let v4 = """
+    CREATE UNIQUE INDEX IF NOT EXISTS jobs_kind_review_unique ON jobs(kind, review_id);
+    CREATE TABLE ingest_reviews (
+        review_id TEXT PRIMARY KEY,
+        repository_path TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        base_ref TEXT NOT NULL,
+        head_ref TEXT NOT NULL,
+        title TEXT NOT NULL,
+        notify INTEGER NOT NULL,
+        unread INTEGER NOT NULL,
+        stale INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        error_code TEXT,
+        error_message TEXT,
+        supersedes TEXT,
+        superseded_by TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    CREATE INDEX ingest_reviews_updated ON ingest_reviews(updated_at DESC, review_id);
+    CREATE INDEX ingest_reviews_repository ON ingest_reviews(repository_path, updated_at DESC);
+    CREATE TABLE ingest_idempotency (
+        idempotency_key TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        review_id TEXT NOT NULL
+    );
+    CREATE TABLE notification_deliveries (
+        review_id TEXT PRIMARY KEY,
+        delivered_at REAL NOT NULL
+    );
     """
 }

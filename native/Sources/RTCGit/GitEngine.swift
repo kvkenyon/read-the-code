@@ -80,9 +80,12 @@ private final class OutputState: @unchecked Sendable {
     func timeout() { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; timedOut=true }
     func finish(stdout: Data, stderr: Data, status: Int32) {
         lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed=true
+        self.stdout.append(stdout)
+        self.stderr.append(stderr)
         if timedOut { continuation.resume(throwing: GitEngineError.timedOut) }
+        else if self.stdout.count + self.stderr.count > limit { continuation.resume(throwing: GitEngineError.outputLimit) }
         else if status != 0 { continuation.resume(throwing: GitEngineError.gitFailed) }
-        else { continuation.resume(returning: GitProcessResult(stdout: stdout, stderr: stderr, status: status)) }
+        else { continuation.resume(returning: GitProcessResult(stdout: self.stdout, stderr: self.stderr, status: status)) }
     }
 }
 
@@ -90,6 +93,15 @@ public actor ExactGitEngine: GitService {
     private let runner: any GitProcessRunning
     private var cancellationRequested = false
     public init(runner: any GitProcessRunning = SystemGitProcessRunner()) { self.runner = runner }
+
+    /// Resolves user-facing submission inputs through the same fixed, shell-free Git
+    /// boundary used by materialization and returns the canonical review identity.
+    public func resolveRevision(repositoryPath: String, base: String, head: String) async throws -> RevisionIdentity {
+        let repository = try await resolveRepository(repositoryPath)
+        let baseSHA = try await resolveCommit(repository, base)
+        let headSHA = try await resolveCommit(repository, head)
+        return try RevisionIdentity(repositoryPath: repository, baseSHA: baseSHA, headSHA: headSHA)
+    }
 
     public func materialize(_ revision: RevisionIdentity) async throws -> ReviewManifest {
         cancellationRequested = false

@@ -37,6 +37,8 @@ targets:
       - target: RTCStore
       - target: RTCReview
       - target: RTCDesign
+      - target: RTCInboxFeature
+      - target: RTCIngest
       - target: RTCLifecycle
       - target: RTCSettings
     settings:
@@ -189,11 +191,24 @@ targets:
   RTCIngest:
     type: framework
     platform: macOS
-    sources: []
+    sources:
+      - Sources/RTCIngest
     dependencies:
       - target: RTCContracts
-      - target: RTCStore
       - target: RTCGit
+      - target: RTCIPC
+      - target: RTCLifecycle
+      - target: RTCStore
+      - package: GRDB
+  RTCInboxFeature:
+    type: framework
+    platform: macOS
+    sources:
+      - Features/Inbox
+    dependencies:
+      - target: RTCContracts
+      - target: RTCDesign
+      - target: RTCIngest
   RTCWorkspaceShell:
     type: framework
     platform: macOS
@@ -253,6 +268,8 @@ targets:
     sources:
       - path: CLI/rtc/RTCCLI.swift
     dependencies:
+      - target: RTCContracts
+      - target: RTCIngest
       - target: RTCIPC
   RTCTestSupport:
     type: framework
@@ -414,6 +431,28 @@ targets:
     dependencies:
       - target: RTCContracts
       - target: RTCTour
+  RTCIngestTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/RTCIngestTests
+    dependencies:
+      - target: RTCCLI
+      - target: RTCContracts
+      - target: RTCGit
+      - target: RTCIngest
+      - target: RTCIPC
+      - target: RTCLifecycle
+      - target: RTCStore
+  RTCInboxFeatureTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/RTCInboxFeatureTests
+    dependencies:
+      - target: RTCContracts
+      - target: RTCInboxFeature
+      - target: RTCIngest
   TourWorkspaceFeatureTests:
     type: tool
     platform: macOS
@@ -444,5 +483,11 @@ targets:
     platform: macOS
     sources:
       - Tests/TourWorkspaceUITests
+    dependencies:
+      - target: ReadTheCode
+  RTCUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: []
     dependencies:
       - target: ReadTheCode
