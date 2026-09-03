@@ -66,6 +66,11 @@ public final class ReviewWorkspaceModel: ObservableObject {
     public func cancelComposer() { composer = nil }
     public func updateComposer(_ body: String) { composer?.body = body }
 
+    private func richText(_ value: String) throws -> RichText {
+        guard value.utf8.count <= RTCConstants.maxCommentBytes else { throw RTCContractError.invalid("comment bytes") }
+        return try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(value, maxCharacters: RTCConstants.maxCommentBytes))])
+    }
+
     /// Context hashes are copied from the immutable materialized diff, never
     /// reconstructed from a working tree or from editor text.
     public func anchor(for selection: CanvasSelection) throws -> ReviewAnchor {
@@ -81,7 +86,7 @@ public final class ReviewWorkspaceModel: ObservableObject {
     @discardableResult public func saveComposer() async throws -> UUID {
         guard !isReadOnly, let composer, !composer.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw RTCDomainError.readOnly }
         let anchor = try anchor(for: composer.selection)
-        let text = try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(composer.body, maxCharacters: RTCConstants.maxCommentBytes))])
+        let text = try richText(composer.body)
         let id = try await handler.createDraft(anchor: anchor, body: text)
         self.composer = nil
         await refresh()
@@ -91,7 +96,7 @@ public final class ReviewWorkspaceModel: ObservableObject {
     public func markViewed(_ path: String, viewed: Bool = true) async throws { guard !isReadOnly else { throw RTCDomainError.readOnly }; try await handler.markViewed(path: path, viewed: viewed); await refresh() }
     public func sendDrafts() async throws -> ReviewDomainEvent { let event = try await handler.sendReview(threadIDs: threads.filter { $0.state == .draft }.map(\.id)); await refresh(); return event }
     public func requestChanges(summary: String) async throws -> ReviewDomainEvent {
-        let rich = summary.isEmpty ? nil : try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(summary, maxCharacters: RTCConstants.maxCommentBytes))])
+        let rich = summary.isEmpty ? nil : try richText(summary)
         let event = try await handler.requestChanges(threadIDs: threads.filter { $0.state == .draft }.map(\.id), summary: rich)
         await refresh(); return event
     }
@@ -114,10 +119,12 @@ public struct ReviewWorkspaceSyntaxAdapter: RTCDiffCanvas.SyntaxHighlighter {
 
 public struct RTCReviewWorkspaceView: View {
     @ObservedObject private var model: ReviewWorkspaceModel
+    @State private var operationError: String?
     public init(model: ReviewWorkspaceModel) { self.model = model }
     public var body: some View {
         VStack(spacing: 0) {
             header
+            if let operationError { RTCErrorState(title: "Review action failed", message: operationError).padding(.vertical, 6) }
             HStack(spacing: 0) {
                 fileNavigator.frame(minWidth: 220, idealWidth: 250, maxWidth: 300)
                 Divider()
@@ -136,7 +143,7 @@ public struct RTCReviewWorkspaceView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack { Text("Draft thread").font(.subheadline.weight(.semibold)); Spacer(); Text("Lines \(composer.selection.startLine)–\(composer.selection.endLine)").font(.caption).foregroundStyle(RTCDesign.color(.textSecondary)) }
                         TextEditor(text: Binding(get: { model.composer?.body ?? "" }, set: { model.updateComposer($0) })).font(.system(.body, design: .monospaced)).frame(minHeight: 76)
-                        HStack { Spacer(); Button("Cancel") { model.cancelComposer() }.buttonStyle(RTCButtonStyle()); Button("Save to Review") { Task { try? await model.saveComposer() } }.buttonStyle(RTCButtonStyle(prominent: true)).keyboardShortcut(.return, modifiers: .command) }
+                        HStack { Spacer(); Button("Cancel") { model.cancelComposer() }.buttonStyle(RTCButtonStyle()); Button("Save to Review") { perform { _ = try await model.saveComposer() } }.buttonStyle(RTCButtonStyle(prominent: true)).keyboardShortcut(.return, modifiers: .command) }
                     }
                 }.padding(16).accessibilityLabel("Inline comment composer")
             }
@@ -150,14 +157,22 @@ public struct RTCReviewWorkspaceView: View {
             Spacer()
             Text("\(model.viewedCount) / \(model.progress.count) Files Viewed").font(.caption).foregroundStyle(RTCDesign.color(.textSecondary))
             Button("Comment") { model.openComposer() }.buttonStyle(RTCButtonStyle()).disabled(model.isReadOnly || model.selection == nil)
-            Button("Approve") { Task { try? await model.approve() } }.buttonStyle(RTCButtonStyle(prominent: true)).disabled(model.isReadOnly)
+            Button("Send review") { perform { _ = try await model.sendDrafts() } }.buttonStyle(RTCButtonStyle()).disabled(model.isReadOnly)
+            Button("Request changes") { perform { _ = try await model.requestChanges(summary: "") } }.buttonStyle(RTCButtonStyle()).disabled(model.isReadOnly)
+            Button("Approve") { perform { _ = try await model.approve() } }.buttonStyle(RTCButtonStyle(prominent: true)).disabled(model.isReadOnly)
+            Button("Close") { perform { _ = try await model.close() } }.buttonStyle(RTCButtonStyle()).disabled(model.isReadOnly)
         }.padding(10).accessibilityElement(children: .contain).accessibilityLabel("Review actions")
+    }
+
+    private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
+        operationError = nil
+        Task { do { try await operation() } catch { operationError = String(describing: error) } }
     }
 
     private var fileNavigator: some View {
         List(model.canvas.files, id: \.artifact.path) { file in
             HStack { Image(systemName: model.progress.first(where: { $0.path == file.artifact.path })?.viewed == true ? "checkmark.circle.fill" : "circle").foregroundStyle(RTCDesign.color(.storySpine)); Text(file.artifact.path).lineLimit(1); Spacer(); Text("+\(file.artifact.additions) −\(file.artifact.deletions)").font(.caption2).foregroundStyle(RTCDesign.color(.textSecondary)) }
-                .contentShape(Rectangle()).onTapGesture { Task { try? await model.markViewed(file.artifact.path) } }
+                .contentShape(Rectangle()).onTapGesture { perform { try await model.markViewed(file.artifact.path) } }
         }.listStyle(.sidebar).accessibilityLabel("Changed files")
     }
 

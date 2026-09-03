@@ -79,7 +79,10 @@ public actor ReviewCommandHandler {
     public func viewedCount() -> Int { progress.values.filter(\.viewed).count }
 
     public func markHead(_ headSHA: String) { revisionState.markHead(headSHA) }
-    private func guardMutable() throws { guard !revisionState.stale else { throw RTCDomainError.staleRevision }; guard revisionState.status != .closed && revisionState.status != .superseded else { throw RTCDomainError.readOnly } }
+    private func guardMutable() throws {
+        guard !revisionState.stale else { throw RTCDomainError.staleRevision }
+        guard ![.closed, .superseded, .approved, .changesRequested].contains(revisionState.status) else { throw RTCDomainError.readOnly }
+    }
     private func validate(_ anchor: ReviewAnchor) async throws { let result = try await resolver.resolve(anchor, for: revisionState.revision); guard result.resolved else { throw result.reason ?? .invalidAnchor } }
 
     @discardableResult public func createDraft(anchor: ReviewAnchor, body: RichText, promotedFrom conversationID: UUID? = nil, messageID: UUID? = nil) async throws -> UUID {

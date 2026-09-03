@@ -110,6 +110,8 @@ public final class ReviewCanvasController: NSViewController {
     private var snapshot: CanvasSnapshot?
     private var selected: CanvasSelection?
     private var restoreAnchor: CanvasSelection?
+    private var appliedRevision: RevisionIdentity?
+    private var appliedFiles: [CanvasFile] = []
     private lazy var dataSource = makeDataSource()
 
     public init() {
@@ -146,9 +148,13 @@ public final class ReviewCanvasController: NSViewController {
 
     public func apply(_ snapshot: CanvasSnapshot, animatingDifferences: Bool = false) {
         precondition(Thread.isMainThread)
+        let incomingSelection = snapshot.selected ?? selected
+        guard appliedRevision != snapshot.revision || appliedFiles.map(\.artifact) != snapshot.files.map(\.artifact) || selected != incomingSelection else { return }
         restoreAnchor = selected
         self.snapshot = snapshot
-        selected = snapshot.selected
+        appliedRevision = snapshot.revision
+        appliedFiles = snapshot.files
+        if let incomingSelection = snapshot.selected { selected = incomingSelection }
         var diff = NSDiffableDataSourceSnapshot<CanvasSection, CanvasItemID>()
         for file in snapshot.files {
             let section = CanvasSection.file(file.artifact.path)
@@ -275,7 +281,7 @@ final class CanvasRowView: NSCollectionViewItem {
     override func loadView() { view = NSView(); label.translatesAutoresizingMaskIntoConstraints = false; label.font = .monospacedSystemFont(ofSize: 12, weight: .regular); view.addSubview(label); NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16), label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16), label.topAnchor.constraint(equalTo: view.topAnchor, constant: 5), label.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -5)]) }
     func represent(item: CanvasItemID, snapshot: CanvasSnapshot?, selected: CanvasSelection?) {
         switch item {
-        case let .hunk(_, index): label.stringValue = snapshot?.files.flatMap(\.hunks).first(where: { $0.index == index })?.header ?? ""
+        case let .hunk(path, index): label.stringValue = snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == index })?.header ?? ""
         case let .contextGap(_, _, side): label.stringValue = side == .before ? "⋯  context above" : "⋯  context below"
         case let .line(path, hunk, index):
             guard let line = snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == hunk })?.lines[index] else { return }
