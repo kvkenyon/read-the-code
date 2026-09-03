@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import RTCContracts
 
 public enum ModelAdapterKind: String, Codable, Sendable { case ollama, openAICompatible }
@@ -23,18 +24,27 @@ public struct ModelLimits: Sendable, Equatable {
 public struct LoopbackEndpoint: Codable, Hashable, Sendable {
     public let url: URL
     public init(_ url: URL) throws {
-        guard url.scheme == "http", url.user == nil, url.password == nil,
-              url.query == nil, url.fragment == nil, let host = url.host,
-              !host.isEmpty, url.port != nil, (1...65_535).contains(url.port!) else {
+        guard Self.isAllowed(url) else {
             throw ModelAdapterError.invalidEndpoint("endpoint must be an http IP literal with a port")
         }
-        guard Self.isLoopback(host) else { throw ModelAdapterError.invalidEndpoint("endpoint is not loopback") }
         self.url = url
     }
-    fileprivate static func isLoopback(_ host: String) -> Bool {
-        if host == "127.0.0.1" || host == "::1" { return true }
-        let pieces = host.split(separator: ".").compactMap { Int($0) }
-        return pieces.count == 4 && pieces[0] == 127 && host == pieces.map(String.init).joined(separator: ".")
+    /// The sole address-authority parser for user input and the transport boundary.
+    /// `inet_pton` rejects hostnames and non-standard/signed/out-of-range numeric forms.
+    public static func isAllowed(_ url: URL) -> Bool {
+        guard url.scheme == "http", url.user == nil, url.password == nil, url.query == nil,
+              url.fragment == nil, let host = url.host, !host.isEmpty, let port = url.port,
+              (1...65_535).contains(port) else { return false }
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, host, &ipv4) == 1 {
+            return withUnsafeBytes(of: &ipv4) { $0.first == 127 }
+        }
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, host, &ipv6) == 1 {
+            let bytes = withUnsafeBytes(of: &ipv6) { Array($0) }
+            return bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        }
+        return false
     }
 }
 
@@ -63,7 +73,7 @@ private final class RedirectDenyingDelegate: NSObject, URLSessionTaskDelegate, @
 public struct URLSessionModelTransport: ModelHTTPTransport {
     public init() {}
     public func send(_ request: URLRequest, limits: ModelLimits) async throws -> AsyncThrowingStream<Data, Error> {
-        guard let url = request.url, let host = url.host, LoopbackEndpoint.isAllowed(host) else { throw ModelAdapterError.invalidEndpoint("destination changed") }
+        guard let url = request.url, LoopbackEndpoint.isAllowed(url) else { throw ModelAdapterError.invalidEndpoint("destination changed") }
         var request = request
         let components = limits.timeout.components
         request.timeoutInterval = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
@@ -86,14 +96,6 @@ public struct URLSessionModelTransport: ModelHTTPTransport {
                 } catch { continuation.finish(throwing: error) }
             }
         }
-    }
-}
-
-extension LoopbackEndpoint {
-    fileprivate static func isAllowed(_ host: String) -> Bool {
-        if host == "127.0.0.1" || host == "::1" { return true }
-        let pieces = host.split(separator: ".").compactMap { Int($0) }
-        return pieces.count == 4 && pieces[0] == 127 && host == pieces.map(String.init).joined(separator: ".")
     }
 }
 

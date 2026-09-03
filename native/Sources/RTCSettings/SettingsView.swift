@@ -20,8 +20,9 @@ public struct RTCSettingsView: View {
     public init(viewModel: RTCSettingsViewModel) { self.viewModel = viewModel }
     public var body: some View {
         Form {
-            Toggle("Enable notifications", isOn: Binding(get: { viewModel.draft.notifications == .on }, set: { viewModel.draft.notifications = $0 ? .on : .off }))
-                .onChange(of: viewModel.draft.notifications) { _, value in if value == .on { Task { await viewModel.requestNotificationPermission() } } }
+            Button(viewModel.draft.notifications == .on ? "Disable notifications" : "Enable notifications") {
+                Task { await viewModel.setNotificationsFromUser(viewModel.draft.notifications != .on) }
+            }
             Toggle("Launch at login", isOn: $viewModel.draft.launchAtLogin)
             Picker("Appearance", selection: $viewModel.draft.appearance) { ForEach(RTCSettings.Appearance.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
             Picker("Editor behavior", selection: $viewModel.draft.editorBehavior) { ForEach(RTCSettings.EditorBehavior.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
@@ -39,8 +40,8 @@ public struct RTCSettingsView: View {
                     healthLabel
                 }
             }
-            if let error = viewModel.validationError { Text(error).foregroundStyle(.red) }
-            HStack { Button("Reset") { viewModel.reset() }; Spacer(); Button("Cancel") { viewModel.cancel() }; Button("Apply") { Task { await viewModel.apply() } }.disabled(!viewModel.hasChanges) }
+            if let error = viewModel.loadError ?? viewModel.validationError { Text(error).foregroundStyle(.red) }
+            HStack { Button("Reset") { Task { await viewModel.reset() } }; Spacer(); Button("Cancel") { viewModel.cancel() }; Button("Apply") { Task { await viewModel.apply() } }.disabled(!viewModel.hasChanges) }
         }.padding().frame(minWidth: 440)
     }
     @ViewBuilder private var healthLabel: some View {

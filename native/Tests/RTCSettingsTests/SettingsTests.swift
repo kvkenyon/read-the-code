@@ -22,7 +22,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(try String(contentsOf: file).contains("token"))
     }
     func testCraftedEndpointsAreRejected() throws {
-        for endpoint in ["https://127.0.0.1:443", "http://localhost:11434", "http://127.0.0.1:11434@evil.test", "http://token@127.0.0.1:11434", "http://127.0.0.1:11434?key=secret", "http://192.168.1.2:11434"] {
+        for endpoint in ["https://127.0.0.1:443", "http://localhost:11434", "http://127.0.0.1:11434@evil.test", "http://token@127.0.0.1:11434", "http://127.0.0.1:11434?key=secret", "http://192.168.1.2:11434", "http://127.256.0.1:11434", "http://127.999.999.999:11434", "http://127.-1.-1.-1:11434"] {
             XCTAssertThrowsError(try RTCSettings.LocalModel(kind: .ollama, endpoint: endpoint, model: "local").validatedEndpoint(), endpoint)
         }
     }
@@ -46,6 +46,66 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(message.contains("secret"))
         XCTAssertFalse(message.contains("token"))
     }
+    func testHostileAndIncompleteStoredFilesAreRejected() throws {
+        for value in ["{", #"{"schemaVersion":99}"#, #"{"schemaVersion":2,"notifications":"off"}"#, #"{"schemaVersion":1,"endpoint":"http://127.0.0.1:11434"}"#, #"{"schemaVersion":2,"notifications":"off","launchAtLogin":false,"appearance":"system","editorBehavior":"followSystem","privacy":{"showPrivateNotificationPreviews":false,"shareDiagnostics":false},"selectedLocalModel":{"kind":"ollama","endpoint":"http://127.0.0.1:11434","model":"bad\nname"}}"#] {
+            let dir = try temporaryDirectory(); let file = dir.appendingPathComponent("settings.json"); try Data(value.utf8).write(to: file)
+            XCTAssertThrowsError(try FileRTCSettingsPersistence(fileURL: file).load())
+        }
+        let dir = try temporaryDirectory(); let file = dir.appendingPathComponent("settings.json")
+        try Data(repeating: 65, count: RTCSettings.maximumStoredBytes + 1).write(to: file)
+        XCTAssertThrowsError(try FileRTCSettingsPersistence(fileURL: file).load())
+    }
+    func testApplyRollsBackAndResetDisablesLifecycle() async throws {
+        let persistence = FailingPersistence(value: RTCSettings(launchAtLogin: false), failSave: true)
+        let lifecycle = RecordingLifecycle()
+        let vm = await MainActor.run { RTCSettingsViewModel(persistence: persistence, lifecycle: lifecycle) }
+        await MainActor.run { vm.draft.launchAtLogin = true }
+        await vm.apply()
+        let calls = await lifecycle.values(); let persisted = await MainActor.run { vm.persisted.launchAtLogin }
+        XCTAssertEqual(calls, [true, false]); XCTAssertEqual(persisted, false)
+        await vm.cancel()
+        let draft = await MainActor.run { vm.draft.launchAtLogin }; XCTAssertEqual(draft, false)
+
+        let resetPersistence = FailingPersistence(value: RTCSettings(launchAtLogin: true))
+        let resetLifecycle = RecordingLifecycle()
+        let resetVM = await MainActor.run { RTCSettingsViewModel(persistence: resetPersistence, lifecycle: resetLifecycle) }
+        await resetVM.reset()
+        let resetCalls = await resetLifecycle.values(); let resetPersisted = await MainActor.run { resetVM.persisted.launchAtLogin }
+        XCTAssertEqual(resetCalls, [false]); XCTAssertFalse(resetPersisted)
+    }
+    func testLifecycleAndRollbackFailuresRemainExplicit() async {
+        let lifecycleFailure = RecordingLifecycle(failCalls: [true])
+        let vm = await MainActor.run { RTCSettingsViewModel(persistence: FailingPersistence(value: .default), lifecycle: lifecycleFailure) }
+        await MainActor.run { vm.draft.launchAtLogin = true }; await vm.apply()
+        let lifecycleError = await MainActor.run { vm.validationError }; XCTAssertEqual(lifecycleError, "Launch at login could not be updated.")
+
+        let rollbackFailure = RecordingLifecycle(failCalls: [false])
+        let rollbackVM = await MainActor.run { RTCSettingsViewModel(persistence: FailingPersistence(value: .default, failSave: true), lifecycle: rollbackFailure) }
+        await MainActor.run { rollbackVM.draft.launchAtLogin = true }; await rollbackVM.apply()
+        let rollbackError = await MainActor.run { rollbackVM.validationError }; XCTAssertEqual(rollbackError, "Settings and launch-at-login could not be reconciled.")
+    }
+    func testLoadErrorDoesNotPretendDefaultsWerePersisted() async {
+        let vm = await MainActor.run { RTCSettingsViewModel(persistence: FailingPersistence(value: .default, failLoad: true), lifecycle: RecordingLifecycle()) }
+        let loadError = await MainActor.run { vm.loadError }; XCTAssertNotNil(loadError)
+        await vm.apply()
+        let applyError = await MainActor.run { vm.validationError }; XCTAssertEqual(applyError, "Settings could not be loaded. Reset settings before applying changes.")
+    }
+    func testNotificationPermissionRequiresExplicitUserAction() async {
+        let requester = RecordingPermissionRequester()
+        let vm = await MainActor.run { RTCSettingsViewModel(persistence: MemoryPersistence(), lifecycle: RecordingLifecycle(), notificationService: requester) }
+        await MainActor.run { vm.draft.notifications = .on }
+        await vm.cancel(); await vm.reset()
+        let beforeExplicitAction = await requester.count(); XCTAssertEqual(beforeExplicitAction, 0)
+        await vm.setNotificationsFromUser(true)
+        let afterExplicitAction = await requester.count(); XCTAssertEqual(afterExplicitAction, 1)
+    }
+    func testFilePersistenceSerializesConcurrentCalls() throws {
+        let directory = try temporaryDirectory(); let persistence = FileRTCSettingsPersistence(fileURL: directory.appendingPathComponent("settings.json"))
+        let group = DispatchGroup(); let queue = DispatchQueue(label: "settings-test", attributes: .concurrent)
+        for index in 0..<40 { group.enter(); queue.async { defer { group.leave() }; try? persistence.save(RTCSettings(launchAtLogin: index.isMultiple(of: 2))) } }
+        XCTAssertEqual(group.wait(timeout: .now() + 3), .success)
+        XCTAssertNoThrow(try persistence.load())
+    }
     private func temporaryDirectory() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
 }
 
@@ -53,9 +113,23 @@ private final class MemoryPersistence: RTCSettingsPersistence, @unchecked Sendab
     private var value = RTCSettings.default
     func load() throws -> RTCSettings { value }; func save(_ settings: RTCSettings) throws { value = settings }; func reset() throws { value = .default }
 }
+private final class FailingPersistence: RTCSettingsPersistence, @unchecked Sendable {
+    private let lock = NSLock(); private var value: RTCSettings; private let failSave: Bool; private let failLoad: Bool
+    init(value: RTCSettings, failSave: Bool = false, failLoad: Bool = false) { self.value = value; self.failSave = failSave; self.failLoad = failLoad }
+    func load() throws -> RTCSettings { lock.lock(); defer { lock.unlock() }; if failLoad { throw RTCSettingsError.invalidStoredSettings }; return value }
+    func save(_ settings: RTCSettings) throws { if failSave { throw RTCSettingsError.persistenceFailure }; lock.lock(); defer { lock.unlock() }; value = settings }
+    func reset() throws { lock.lock(); defer { lock.unlock() }; value = .default }
+}
 private actor RecordingLifecycle: AppLifecycleService {
     private var calls = [Bool]()
+    private let failCalls: Set<Bool>
+    init(failCalls: Set<Bool> = []) { self.failCalls = failCalls }
     func activate(reviewID: ReviewID?) async {}
-    func launchAtLogin(enabled: Bool) async throws { calls.append(enabled) }
+    func launchAtLogin(enabled: Bool) async throws { calls.append(enabled); if failCalls.contains(enabled) { throw RTCSettingsError.persistenceFailure } }
     func values() -> [Bool] { calls }
+}
+private actor RecordingPermissionRequester: NotificationPermissionRequester {
+    private var requests = 0
+    func requestPermissionIfNeeded() async throws -> NotificationAuthorization { requests += 1; return .authorized }
+    func count() -> Int { requests }
 }
