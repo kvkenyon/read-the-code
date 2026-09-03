@@ -1,0 +1,5 @@
+[
+  {"schemaVersion":2,"id":"00000000-0000-0000-0000-000000000001","reviewID":"0123456789abcdef01234567","conversationID":"00000000-0000-0000-0000-000000000010","sequence":1,"kind":"humanMessageQueued","body":null,"citedAnchors":[],"createdAt":"2026-01-01T00:00:00Z"},
+  {"schemaVersion":2,"id":"00000000-0000-0000-0000-000000000002","reviewID":"0123456789abcdef01234567","conversationID":"00000000-0000-0000-0000-000000000010","sequence":2,"kind":"workerWakeSignaled","body":null,"citedAnchors":[],"createdAt":"2026-01-01T00:00:00Z"},
+  {"schemaVersion":2,"id":"00000000-0000-0000-0000-000000000003","reviewID":"0123456789abcdef01234567","conversationID":"00000000-0000-0000-0000-000000000010","sequence":3,"kind":"workerAvailabilityChanged","body":null,"citedAnchors":[],"createdAt":"2026-01-01T00:00:00Z"}
+]
