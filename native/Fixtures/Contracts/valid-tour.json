@@ -1,0 +1,18 @@
+{
+  "chapters": [],
+  "id": "00000000-0000-0000-0000-000000000001",
+  "inputDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "overview": [
+    { "paragraph": { "runs": [{ "kind": "plain", "text": "Exact committed-tree review." }] } }
+  ],
+  "producer": "localModel",
+  "reviewFocuses": [],
+  "risks": [],
+  "schemaVersion": 2,
+  "title": "Overview",
+  "revision": {
+    "baseSHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "headSHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repositoryPath": "/tmp/repo"
+  }
+}

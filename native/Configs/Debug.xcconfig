@@ -1,0 +1,3 @@
+MACOSX_DEPLOYMENT_TARGET = 14.0
+RTC_UPDATE_CHANNEL = stable
+RTC_SPARKLE_FEED_URL = https://updates.invalid/read-the-code/appcast.xml
