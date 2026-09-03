@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+if [ "$(uname -s)" != "Darwin" ]; then
+  printf '%s\n' 'SKIP: native packaging hooks require macOS; unsigned validation runs in the native macOS workflow.'
+  exit 0
+fi
+
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 cd "$repo_root"
 

@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   unsigned-validation:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Require Swift 6
+        run: swift --version && swift --version | grep -E 'Apple Swift version 6\.'
       - run: npm ci
       - run: scripts/native-check.sh
       - run: npm run test:native-packaging
