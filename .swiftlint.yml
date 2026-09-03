@@ -1,0 +1,4 @@
+included: [native/Sources, native/Tests]
+excluded: [native/.build]
+line_length: 140
+disabled_rules: [identifier_name, type_body_length]
