@@ -50,7 +50,7 @@ public struct PromotedConversationMessage: Sendable, Equatable {
 /// Coordinates durable conversation events. Wake delivery is deliberately advisory: callers can
 /// always recover the complete stream by polling from `acknowledgedCursor`.
 public actor AgentChatCoordinator {
-    private let repository: ConversationEventRepository
+    private let repository: ConversationReplayRepository
     private let wakeSink: WakeSink
     private let reviewID: ReviewID
     private let conversationID: UUID
@@ -59,31 +59,63 @@ public actor AgentChatCoordinator {
     private var availability: WorkerAvailability = .offline
     private var ended = false
     private var acknowledgedCursor = 0
+    private var hydrated = false
 
-    public init(reviewID: ReviewID, conversationID: UUID, repository: ConversationEventRepository, wakeSink: WakeSink) {
+    public init(reviewID: ReviewID, conversationID: UUID, repository: ConversationReplayRepository, wakeSink: WakeSink) {
         self.reviewID = reviewID; self.conversationID = conversationID
         self.repository = repository; self.wakeSink = wakeSink
     }
 
+    public var conversationIDValue: UUID { conversationID }
+    public var reviewIDValue: ReviewID { reviewID }
+
     public func replay(after cursor: Int = 0) async throws -> ConversationSnapshot {
-        guard cursor >= 0 else { throw AgentChatError.invalidCursor }
-        let received = try await repository.replay(reviewID: reviewID, conversationID: conversationID, after: cursor)
-        try validate(received, after: cursor)
+        let page = try await pollPage(after: cursor)
+        return snapshot(events: page.events)
+    }
+
+    public func hydrate() async throws {
+        guard !hydrated else { return }
+        let received = try await repository.state(reviewID: reviewID, conversationID: conversationID)
+        try validate(received, after: 0)
         merge(received)
-        return snapshot()
+        rehydrateLifecycle()
+        hydrated = true
+    }
+
+    public func pollPage(after cursor: Int, maximumEvents: Int = 100, maximumBytes: Int = 512 * 1024) async throws -> ConversationPage {
+        guard cursor >= 0 else { throw AgentChatError.invalidCursor }
+        try await hydrate()
+        let page = try await repository.page(reviewID: reviewID, conversationID: conversationID, after: cursor, maximumEvents: maximumEvents, maximumBytes: maximumBytes)
+        try validate(page.events, after: cursor); merge(page.events); return page
     }
 
     /// Worker-facing poll operation. The cursor is a durable acknowledgement cursor, not a wake token.
-    public func poll(after cursor: Int) async throws -> ConversationSnapshot { try await replay(after: cursor) }
+    public func poll(after cursor: Int) async throws -> ConversationSnapshot { _ = try await pollPage(after: cursor); return snapshot() }
 
     /// Worker-facing reply operation; replies are represented by assistant lifecycle events.
     public func reply(_ body: RichText) async throws -> ConversationSnapshot {
-        _ = try await startAssistantMessage()
-        _ = try await appendAssistantDelta(body.runs.map(\.text.value).joined())
-        return try await completeAssistantMessage()
+        throw AgentChatError.invalidEvent("reply requires durable request journal")
+    }
+
+    public func prepareReply(_ body: RichText) throws -> [ConversationEvent] {
+        guard !ended else { throw AgentChatError.ended }; guard availability == .online else { throw AgentChatError.workerUnavailable }
+        let text = body.runs.map(\.text.value).joined()
+        guard text.utf8.count <= 4_096 else { throw AgentChatError.invalidEvent("reply limit") }
+        let start = try event(kind: .assistantMessageStarted)
+        let deltaBody = try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(text, maxCharacters: 4_096))])
+        let delta = try event(kind: .assistantMessageDelta, body: deltaBody, sequence: start.sequence + 1)
+        let complete = try event(kind: .assistantMessageCompleted, sequence: start.sequence + 2)
+        return [start, delta, complete]
+    }
+
+    public func applyCommitted(_ committed: [ConversationEvent]) throws {
+        if committed.allSatisfy({ event in events.contains(where: { $0.id == event.id }) }) { rehydrateLifecycle(); return }
+        try validate(committed, after: events.last?.sequence ?? 0); merge(committed); rehydrateLifecycle()
     }
 
     public func queueMessage(_ body: RichText, citedAnchors: [ReviewAnchor] = []) async throws -> ConversationSnapshot {
+        try await hydrate()
         guard !ended else { throw AgentChatError.ended }
         try validateAnchors(citedAnchors)
         let event = try event(kind: .humanMessageQueued, body: body, citedAnchors: citedAnchors)
@@ -93,22 +125,35 @@ public actor AgentChatCoordinator {
     }
 
     public func acknowledge(upTo cursor: Int) async throws -> ConversationSnapshot {
+        try await hydrate()
         guard cursor >= acknowledgedCursor, cursor <= events.last?.sequence ?? 0 else { throw AgentChatError.invalidCursor }
         guard cursor > acknowledgedCursor else { return snapshot() }
-        let event = try event(kind: .workerAcknowledged, sequence: cursor)
+        let body = try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(String(cursor)))])
+        let event = try event(kind: .workerAcknowledged, body: body)
         try await append(event)
         acknowledgedCursor = cursor
         return snapshot()
     }
 
     public func setAvailability(_ value: WorkerAvailability) async throws -> ConversationSnapshot {
-        let event = try event(kind: .workerAvailabilityChanged, body: try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(value.rawValue))]))
+        try await hydrate()
+        let event = try prepareAvailability(value)
         try await append(event)
         availability = value
         return snapshot()
     }
 
+    public func prepareAvailability(_ value: WorkerAvailability) throws -> ConversationEvent {
+        try event(kind: .workerAvailabilityChanged, body: try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(value.rawValue))]))
+    }
+
+    public func prepareAcknowledgement(upTo cursor: Int) throws -> ConversationEvent {
+        guard cursor >= acknowledgedCursor, cursor <= events.last?.sequence ?? 0 else { throw AgentChatError.invalidCursor }
+        return try event(kind: .workerAcknowledged, body: RichText(runs: [RichTextRun(kind: .plain, text: BoundedString(String(cursor)))]))
+    }
+
     public func startAssistantMessage() async throws -> ConversationSnapshot {
+        try await hydrate()
         guard !ended else { throw AgentChatError.ended }
         guard availability == .online else { throw AgentChatError.workerUnavailable }
         try await append(event(kind: .assistantMessageStarted))
@@ -116,6 +161,7 @@ public actor AgentChatCoordinator {
     }
 
     public func appendAssistantDelta(_ delta: String) async throws -> ConversationSnapshot {
+        try await hydrate()
         guard !ended else { throw AgentChatError.ended }
         guard !delta.isEmpty else { return snapshot() }
         let text = try BoundedString(delta, maxCharacters: 4_096)
@@ -128,6 +174,7 @@ public actor AgentChatCoordinator {
     public func failAssistantMessage() async throws -> ConversationSnapshot { try await finish(.assistantMessageFailed) }
 
     public func retry() async throws -> ConversationSnapshot {
+        try await hydrate()
         guard !ended else { throw AgentChatError.ended }
         guard availability == .online else { throw AgentChatError.workerUnavailable }
         try await coalescedWake()
@@ -135,6 +182,7 @@ public actor AgentChatCoordinator {
     }
 
     public func end() async throws -> ConversationSnapshot {
+        try await hydrate()
         guard !ended else { return snapshot() }
         try await append(event(kind: .conversationEnded)); ended = true; availability = .ended
         return snapshot()
@@ -147,8 +195,9 @@ public actor AgentChatCoordinator {
 
     public func flushWake() async throws {
         guard wakePending else { return }
-        wakePending = false
         try await wakeSink.wake(reviewID: reviewID, conversationID: conversationID, highestSequence: events.last?.sequence ?? 0)
+        try await append(event(kind: .workerWakeSignaled))
+        wakePending = false
     }
 
     private func finish(_ kind: ConversationEventKind) async throws -> ConversationSnapshot {
@@ -177,11 +226,25 @@ public actor AgentChatCoordinator {
 
     private func merge(_ values: [ConversationEvent]) { for value in values where !events.contains(where: { $0.id == value.id }) { events.append(value) }; events.sort { $0.sequence < $1.sequence } }
 
-    private func snapshot() -> ConversationSnapshot {
+    private func rehydrateLifecycle() {
+        ended = events.contains { $0.kind == .conversationEnded }
+        availability = ended ? .ended : .offline
+        acknowledgedCursor = 0
+        for event in events {
+            if event.kind == .workerAvailabilityChanged,
+               let text = event.body?.runs.map(\.text.value).joined(),
+               let value = WorkerAvailability(rawValue: text) { availability = value }
+            if event.kind == .workerAcknowledged,
+               let text = event.body?.runs.map(\.text.value).joined(),
+               let value = Int(text) { acknowledgedCursor = max(acknowledgedCursor, value) }
+        }
+    }
+
+    private func snapshot(events visibleEvents: [ConversationEvent]? = nil) -> ConversationSnapshot {
         let queued = events.filter { $0.kind == .humanMessageQueued && $0.sequence > acknowledgedCursor }.count
         let active = events.last?.kind == .assistantMessageStarted || events.last?.kind == .assistantMessageDelta
         let text = active ? events.reversed().first(where: { $0.kind == .assistantMessageDelta })?.body?.runs.map(\.text.value).joined() : nil
-        return ConversationSnapshot(reviewID: reviewID, conversationID: conversationID, events: events, cursor: events.last?.sequence ?? 0, acknowledgedCursor: acknowledgedCursor, availability: availability, ended: ended, queuedMessageCount: queued, streamingText: text)
+        return ConversationSnapshot(reviewID: reviewID, conversationID: conversationID, events: visibleEvents ?? events, cursor: events.last?.sequence ?? 0, acknowledgedCursor: acknowledgedCursor, availability: availability, ended: ended, queuedMessageCount: queued, streamingText: text)
     }
 
     private func event(kind: ConversationEventKind, body: RichText? = nil, citedAnchors: [ReviewAnchor] = [], sequence: Int? = nil) throws -> ConversationEvent {

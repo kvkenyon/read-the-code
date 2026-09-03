@@ -17,6 +17,7 @@ for test_target in \
     RTCDiffCanvasTests \
     RTCDomainTests \
     RTCIPCTests \
+    RTCAgentChatSmokeTests \
     RTCLifecycleTests \
     RTCReviewPersistenceTests \
     RTCReviewTests \

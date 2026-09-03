@@ -22,6 +22,10 @@ import Glibc
         check((try? oversizeDecoder.append(Data([0xff, 0xff, 0xff, 0xff]))) == nil, "oversize")
         check((try? IPCFrameCodec.decodeJSON([String: Int].self, from: Data([0xff]))) == nil, "utf8")
         check((try? IPCFrameCodec.decode(Data([0, 0, 0]))) == nil, "truncated")
+        let chatOnly = IPCScopedCapabilityStore(["chat-worker": ["pollConversationEvents", "postConversationReply"]])
+        check(chatOnly.isAuthorized("chat-worker", operation: "pollConversationEvents"), "chat capability grants poll")
+        check(!chatOnly.isAuthorized("chat-worker", operation: "approveReview"), "chat capability cannot decide review")
+        check(!chatOnly.isAuthorized("other", operation: "postConversationReply"), "unknown capability denied")
 
         let socketPath = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("rtc-ipc-\(UUID().uuidString.prefix(8)).sock")

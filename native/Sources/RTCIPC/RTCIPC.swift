@@ -97,6 +97,17 @@ public struct IPCAllowList: IPCCapabilityStore, Sendable {
     public func isAuthorized(_ capability: String, operation: String) -> Bool { !capability.isEmpty && values.contains(capability) }
 }
 
+/// A capability names both the principal and the only operations it may invoke.
+/// This prevents a chat worker capability from being reused for review mutation.
+public struct IPCScopedCapabilityStore: IPCCapabilityStore, Sendable {
+    private let grants: [String: Set<String>]
+    public init(_ grants: [String: Set<String>]) { self.grants = grants }
+    public func isAuthorized(_ capability: String, operation: String) -> Bool {
+        guard !capability.isEmpty, !operation.isEmpty, let operations = grants[capability] else { return false }
+        return operations.contains(operation)
+    }
+}
+
 public struct IPCDispatcher: Sendable {
     public let handler: any IPCOperationHandler
     public let peer: any IPCPeerAuthenticator
