@@ -67,9 +67,15 @@ public protocol NotificationPresenter: Sendable {
     func setBadge(_ value: Int) async
 }
 
+/// Keeps permission prompting at the lifecycle boundary and lets settings invoke it
+/// only in response to an explicit user action.
+public protocol NotificationPermissionRequester: Sendable {
+    func requestPermissionIfNeeded() async throws -> NotificationAuthorization
+}
+
 /// A notification service whose durable delivery mark is written only after the post succeeds.
 /// A denied notification permission therefore cannot prevent the caller from committing a review.
-public actor DeduplicatingNotificationService: NotificationService {
+public actor DeduplicatingNotificationService: NotificationService, NotificationPermissionRequester {
     private let presenter: any NotificationPresenter
     private let deliveryStore: any NotificationDeliveryStore
     private let privatePreview: Bool

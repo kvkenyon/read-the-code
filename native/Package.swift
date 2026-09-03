@@ -16,6 +16,7 @@ let libraryTargets = [
     "RTCReview",
     "RTCDesign",
     "RTCLifecycle",
+    "RTCSettings",
     "RTCWorkspaceShell",
     "RTCCLI",
     "GitWorker",
@@ -56,6 +57,7 @@ let package = Package(
         .target(name: "RTCReview", dependencies: ["RTCContracts", "RTCDomain"]),
         .target(name: "RTCDesign"),
         .target(name: "RTCLifecycle", dependencies: ["RTCContracts"]),
+        .target(name: "RTCSettings", dependencies: ["RTCContracts", "RTCModelAdapters", "RTCLifecycle"]),
         .target(name: "RTCWorkspaceShell", dependencies: ["RTCDesign"]),
         .target(
             name: "RTCCLI",
@@ -89,6 +91,7 @@ let package = Package(
                 "RTCReview",
                 "RTCDesign",
                 "RTCLifecycle",
+                "RTCSettings",
             ],
             path: "App/ReadTheCodeApp"
         ),
@@ -107,6 +110,7 @@ let package = Package(
         .testTarget(name: "RTCModelAdapterTests", dependencies: ["RTCContracts", "RTCModelAdapters"]),
         .testTarget(name: "RTCStoreTests", dependencies: ["RTCStore"]),
         .testTarget(name: "RTCWorkspaceShellTests", dependencies: ["RTCWorkspaceShell"]),
+        .testTarget(name: "RTCSettingsTests", dependencies: ["RTCSettings"]),
         // The landed smoke modules intentionally own their entry points. The native gate
         // runs every one after building the graph.
         .executableTarget(name: "RTCCLITests", dependencies: ["RTCCLI"], path: "Tests/RTCCLITests"),
