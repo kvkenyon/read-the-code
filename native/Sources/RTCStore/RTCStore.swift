@@ -226,7 +226,7 @@ public final class SQLiteConversationEventRepository: ConversationReplayReposito
         }
     }
 
-    public func commit(reviewID: ReviewID, conversationID: UUID, requestID: UUID, operation: String, payloadDigest: SHA256Digest, events: [ConversationEvent]) async throws -> ConversationRequestCommit {
+    public func commit(reviewID: ReviewID, conversationID: UUID, requestID: UUID, operation: String, payloadDigest: RTCContracts.SHA256Digest, events: [ConversationEvent]) async throws -> ConversationRequestCommit {
         try await store.write { db in
             if let row = try Row.fetchOne(db, sql: "SELECT operation, payload_digest, response FROM conversation_requests WHERE review_id = ? AND conversation_id = ? AND request_id = ?", arguments: [reviewID.value, conversationID.uuidString, requestID.uuidString]) {
                 guard row["operation"] as String == operation, row["payload_digest"] as String == payloadDigest.hex else { throw RTCStoreError.corrupt("conversation request conflict") }
