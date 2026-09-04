@@ -32,9 +32,9 @@ targets:
       - App/ReadTheCodeApp
     dependencies:
       - target: RTCContracts
+      - target: RTCIPC
       - target: RTCDomain
       - target: RTCStore
-      - target: RTCIPC
       - target: RTCReview
       - target: RTCDesign
       - target: RTCLifecycle
@@ -150,6 +150,7 @@ targets:
       - Sources/RTCAgentChat
     dependencies:
       - target: RTCContracts
+      - target: RTCIPC
   RTCReview:
     type: framework
     platform: macOS
@@ -360,6 +361,16 @@ targets:
     dependencies:
       - target: RTCContracts
       - target: RTCIPC
+  RTCAgentChatSmokeTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/RTCAgentChatSmokeTests
+    dependencies:
+      - target: RTCContracts
+      - target: RTCStore
+      - target: RTCIPC
+      - target: RTCAgentChat
   RTCLifecycleTests:
     type: tool
     platform: macOS
