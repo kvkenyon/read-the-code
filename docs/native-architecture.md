@@ -1,6 +1,6 @@
 # Native source architecture
 
-The native tree is a SwiftPM/XcodeGen module graph targeting macOS 14. The current source graph compiles with Command Line Tools; it is not yet the final composed or packaged product.
+The native tree is a SwiftPM/XcodeGen module graph targeting macOS 14. The current source graph and demo application compile with Command Line Tools; it is not yet a signed, notarized, or release-qualified product.
 
 ```text
 RTCContracts
@@ -15,6 +15,8 @@ RTCContracts
 
 Diagnostic preparation adds typed per-field serialization and stages a directory bundle privately. `PendingDiagnosticExport` is an actor-isolated one-shot state machine. `DiagnosticExportIPCComposition` creates separate preparation and confirmation dispatchers with disjoint capabilities and a shared opaque pending registry. Only the confirmation handler owns the private short-lived, one-use approval authority. The staging root descriptor remains open from no-follow creation through leaf writes, atomic rename, publication, and cleanup; path replacement cannot redirect the operation. Publication uses a separately opened no-follow destination descriptor and exclusive rename. The module performs no upload.
 
-`native/Package.swift` and `native/project.yml` register only the new `RTCExport` source and `RTCExportTests` executable in this slice. `scripts/validate-native-manifests.mjs` keeps both manifest dependency graphs synchronized. `scripts/validate-native-skill.swift` mechanically compares the portable skill with the native CLI parser surface.
+`native/Package.swift` and `native/project.yml` keep the SwiftPM and XcodeGen app dependency graphs synchronized. `scripts/validate-native-manifests.mjs` validates both manifests, and `scripts/validate-native-skill.swift` mechanically compares the portable skill with the native CLI parser surface.
 
-The `ReadTheCode` app target compiles `RTCExport`, and the two export IPC service dispatchers are implemented, but no socket listener, CLI execution path, confirmation UI, final feature composition, or signed packaging connects them yet. See the exact wire and export shapes in [protocol v2](protocol-v2.md) and current boundaries in [native security](native-security.md).
+The `ReadTheCode` composition root starts the private ingest runtime and socket, renders the Inbox, and opens a stored exact revision through the existing diff, comment, deterministic tour, bounded-diagram, and durable conversation features. The local **Open Repository…** path resolves and reviews `HEAD^` → `HEAD`; submitted reviews use the same composition. Tour rendering resolves only from the immutable stored manifest, and every review mutation re-resolves the submitted refs and repository identity before it can append an event. The worker rail truthfully remains offline unless an external worker transport is connected.
+
+A raw `swift run --package-path native ReadTheCode` process has no application-bundle proxy, so the composition root does not instantiate `UNUserNotificationCenter` there. Generated `.app` builds retain the system notification presenter. The private capability, spool, and database stay under Application Support; only the ephemeral Unix socket uses a deterministic, UID-scoped `/tmp` name so it remains within Darwin's short `sockaddr_un` limit. Same-UID authentication, mode-`0600` socket access, and the operation allowlist still guard every request. Export confirmation UI, worker-chat IPC routing, complete native CLI operations, full-Xcode UI checks, signing, notarization, and final packaging remain unimplemented or unverified as documented in [protocol v2](protocol-v2.md) and [native security](native-security.md).

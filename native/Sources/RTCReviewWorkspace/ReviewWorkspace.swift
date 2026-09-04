@@ -110,6 +110,10 @@ public final class ReviewWorkspaceModel: ObservableObject {
     }
 
     public func select(_ next: CanvasSelection) { selection=next; selectedFile=next.path }
+    public func navigate(to next: CanvasSelection, focus: Bool = true) {
+        selection=next; selectedFile=next.path
+        navigationRequest=NavigationRequest(selection: next, file: nil, focus: focus)
+    }
     public func selectFile(_ path: String, focus: Bool = true) { selectedFile=path; navigationRequest=NavigationRequest(selection: nil, file: path, focus: focus) }
     public func selectThread(_ id: UUID, focus: Bool = true) {
         guard let thread=threads.first(where: { $0.id == id }), let side=thread.anchor.side, let start=thread.anchor.startLine, let end=thread.anchor.endLine else { return }

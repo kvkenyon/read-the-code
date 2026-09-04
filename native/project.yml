@@ -31,17 +31,24 @@ targets:
     sources:
       - App/ReadTheCodeApp
     dependencies:
+      - target: RTCAgentChat
       - target: RTCContracts
       - target: RTCIPC
       - target: RTCDomain
+      - target: RTCDiffCanvas
+      - target: RTCGit
       - target: RTCStore
       - target: RTCReview
+      - target: RTCReviewWorkspace
       - target: RTCDesign
       - target: RTCExport
       - target: RTCInboxFeature
       - target: RTCIngest
       - target: RTCLifecycle
       - target: RTCSettings
+      - target: RTCTourIntegration
+      - target: RTCWorkspaceShell
+      - target: TourWorkspace
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app
       GENERATE_INFOPLIST_FILE: NO
