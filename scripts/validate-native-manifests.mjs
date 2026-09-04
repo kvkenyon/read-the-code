@@ -45,6 +45,15 @@ const expectedDependencies = {
   RTCLifecycle: ['RTCContracts'],
   RTCSettings: ['RTCContracts', 'RTCModelAdapters', 'RTCLifecycle'],
   RTCWorkspaceShell: ['RTCDesign'],
+  RTCReviewWorkspace: [
+    'RTCContracts',
+    'RTCDiffCanvas',
+    'RTCDesign',
+    'RTCDomain',
+    'RTCReview',
+    'RTCSyntax',
+    'RTCWorkspaceShell',
+  ],
   RTCCLI: ['RTCIPC'],
   RTCTestSupport: ['RTCContracts'],
   RTCAgentChatTests: ['RTCAgentChat', 'RTCContracts'],
@@ -62,6 +71,7 @@ const expectedDependencies = {
   RTCIPCTests: ['RTCContracts', 'RTCIPC'],
   RTCLifecycleTests: ['RTCContracts', 'RTCLifecycle'],
   RTCReviewTests: ['RTCContracts', 'RTCDomain', 'RTCReview'],
+  RTCReviewPersistenceTests: ['RTCContracts', 'RTCDomain', 'RTCReview', 'RTCStore'],
   RTCSyntaxTests: ['RTCContracts', 'RTCSyntax'],
   RTCTourTests: ['RTCContracts', 'RTCTour'],
   TourWorkspaceFeatureTests: [
@@ -73,6 +83,13 @@ const expectedDependencies = {
     'RTCTour',
     'RTCTourIntegration',
     'TourWorkspace',
+  ],
+  RTCReviewWorkspaceFeatureTests: [
+    'RTCContracts',
+    'RTCDiffCanvas',
+    'RTCDomain',
+    'RTCReview',
+    'RTCReviewWorkspace',
   ],
 };
 
@@ -183,9 +200,11 @@ for (const [directory, packageType, xcodeType] of [
   ['RTCIPCTests', 'executable', 'tool'],
   ['RTCLifecycleTests', 'executable', 'tool'],
   ['RTCReviewTests', 'executable', 'tool'],
+  ['RTCReviewPersistenceTests', 'executable', 'tool'],
   ['RTCSyntaxTests', 'executable', 'tool'],
   ['RTCTourTests', 'executable', 'tool'],
   ['TourWorkspaceFeatureTests', 'executable', 'tool'],
+  ['RTCReviewWorkspaceFeatureTests', 'executable', 'tool'],
 ]) {
   const source = fs
     .readdirSync(path.join(repositoryRoot, 'native/Tests', directory))

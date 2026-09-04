@@ -181,11 +181,30 @@ public enum ReviewStatus: String, Codable, Sendable {
 }
 
 public enum ReviewEventKind: String, Codable, Sendable {
-    case feedback, changesRequested, approval, close, threadResolved, threadReopened
+    case threadCreated, threadMessageAdded, fileProgressChanged, feedback, changesRequested, approval, close,
+        threadResolved, threadReopened
+}
+public struct PendingReviewEvent: Sendable {
+    public let id: UUID, reviewID: ReviewID, revision: RevisionIdentity, kind: ReviewEventKind,
+        payload: [String: String], createdAt: Date
+    public init(
+        id: UUID = UUID(), reviewID: ReviewID, revision: RevisionIdentity, kind: ReviewEventKind,
+        payload: [String: String], createdAt: Date = Date()
+    ) {
+        self.id = id; self.reviewID = reviewID; self.revision = revision; self.kind = kind; self.payload = payload;
+        self.createdAt = Date(timeIntervalSince1970: floor(createdAt.timeIntervalSince1970))
+    }
 }
 public struct ReviewEvent: Codable, Hashable, Sendable {
     public let schemaVersion: Int, id: UUID, reviewID: ReviewID, revision: RevisionIdentity, sequence: Int,
         kind: ReviewEventKind, payload: [String: String], createdAt: Date
+    public init(
+        id: UUID, reviewID: ReviewID, revision: RevisionIdentity, sequence: Int, kind: ReviewEventKind,
+        payload: [String: String], createdAt: Date
+    ) {
+        schemaVersion = 2; self.id = id; self.reviewID = reviewID; self.revision = revision;
+        self.sequence = sequence; self.kind = kind; self.payload = payload; self.createdAt = createdAt
+    }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self);
         guard try c.decode(Int.self, forKey: .schemaVersion) == RTCConstants.schemaVersion else {
@@ -456,8 +475,11 @@ public protocol JobRepository: Sendable {
     func requeueExpired(kind: JobKind, now: Date) async throws -> [UUID]; func job(id: UUID) async throws -> JobRecord?;
     func complete(_ jobID: UUID, state: JobState) async throws
 }
+public enum EventRepositoryError: Error, Equatable, Sendable {
+    case concurrentModification, idempotencyConflict, reviewUnavailable
+}
 public protocol EventRepository: Sendable {
-    func append(_ event: ReviewEvent) async throws;
+    func append(_ proposal: PendingReviewEvent, after expectedSequence: Int) async throws -> ReviewEvent;
     func events(after sequence: Int, reviewID: ReviewID) async throws -> [ReviewEvent]
 }
 public protocol ConversationEventRepository: Sendable {

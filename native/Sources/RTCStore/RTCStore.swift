@@ -139,27 +139,23 @@ public final class SQLiteEventRepository: EventRepository, @unchecked Sendable {
     private let store: SQLiteStore
     public init(store: SQLiteStore) { self.store = store }
 
-    public func append(_ event: ReviewEvent) async throws {
+    public func append(_ proposal: PendingReviewEvent, after expectedSequence: Int) async throws -> ReviewEvent {
         try await store.write { db in
-            try db.inTransaction {
-                if try Int.fetchOne(
-                    db, sql: "SELECT 1 FROM review_events WHERE event_id = ?", arguments: [event.id.uuidString]) != nil
-                {
-                    return .commit
-                }
-                let next =
-                    (try Int.fetchOne(
-                        db, sql: "SELECT COALESCE(MAX(sequence), 0) + 1 FROM review_events WHERE review_id = ?",
-                        arguments: [event.reviewID.value])) ?? 1
-                let data = try Self.payload(event, sequence: next)
-                try db.execute(
-                    sql:
-                        "INSERT INTO review_events (review_id, sequence, event_id, payload, created_at) VALUES (?, ?, ?, ?, ?)",
-                    arguments: [
-                        event.reviewID.value, next, event.id.uuidString, data, event.createdAt.timeIntervalSince1970,
-                    ])
-                return .commit
+            if let data = try Data.fetchOne(db, sql: "SELECT payload FROM review_events WHERE event_id = ?", arguments: [proposal.id.uuidString]) {
+                let stored = try JSONDecoder.rtc.decode(ReviewEvent.self, from: data)
+                guard stored.reviewID == proposal.reviewID, stored.revision == proposal.revision, stored.kind == proposal.kind, stored.payload == proposal.payload, stored.createdAt == proposal.createdAt else { throw EventRepositoryError.idempotencyConflict }
+                return stored
             }
+            guard let reviewData = try Data.fetchOne(db, sql: "SELECT payload FROM reviews WHERE id = ?", arguments: [proposal.reviewID.value]) else { throw EventRepositoryError.reviewUnavailable }
+            let review = try JSONDecoder.rtc.decode(ReviewManifest.self, from: reviewData)
+            guard review.id == proposal.reviewID, review.revision == proposal.revision, !review.stale,
+                  ![.approved, .changesRequested, .closed, .superseded].contains(review.status) else { throw EventRepositoryError.reviewUnavailable }
+            let current = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(sequence), 0) FROM review_events WHERE review_id = ?", arguments: [proposal.reviewID.value])) ?? 0
+            guard current == expectedSequence else { throw EventRepositoryError.concurrentModification }
+            let event = ReviewEvent(id: proposal.id, reviewID: proposal.reviewID, revision: proposal.revision, sequence: current + 1, kind: proposal.kind, payload: proposal.payload, createdAt: proposal.createdAt)
+            let data = try JSONEncoder.rtc.encode(event)
+            try db.execute(sql: "INSERT INTO review_events (review_id, sequence, event_id, payload, created_at) VALUES (?, ?, ?, ?, ?)", arguments: [event.reviewID.value, event.sequence, event.id.uuidString, data, event.createdAt.timeIntervalSince1970])
+            return event
         }
     }
 
@@ -172,11 +168,6 @@ public final class SQLiteEventRepository: EventRepository, @unchecked Sendable {
         }
     }
 
-    private static func payload(_ event: ReviewEvent, sequence: Int) throws -> Data {
-        var object = try JSONSerialization.jsonObject(with: JSONEncoder.rtc.encode(event)) as! [String: Any]
-        object["sequence"] = sequence
-        return try JSONSerialization.data(withJSONObject: object)
-    }
 }
 
 public final class JobQueue: JobRepository, @unchecked Sendable {
