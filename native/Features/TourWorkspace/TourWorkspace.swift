@@ -22,6 +22,9 @@ public final class TourWorkspaceModel: ObservableObject {
     @Published public private(set) var history: TourHistorySnapshot?
     @Published public private(set) var resolvedSlices: [DiffSliceReference: ResolvedDiffSlice] = [:]
     @Published public private(set) var diagramLayouts: [String: DiagramLayout] = [:]
+    /// Material diagram categories the selected validated document does not contain.
+    /// This is evidence only: rendering never synthesizes a diagram from an intent.
+    @Published public private(set) var unavailableDiagramKinds: [DiagramKind] = []
     @Published public var selectedSectionID = "overview"
 
     public let reviewID: ReviewID
@@ -31,6 +34,7 @@ public final class TourWorkspaceModel: ObservableObject {
     private let artifacts: any TourArtifactResolving
     private let navigate: @MainActor (ReviewAnchor) -> Void
     private var generationTask: Task<Void, Never>?
+    private var renderingTask: Task<Void, Never>?
 
     public init(
         reviewID: ReviewID, revision: RevisionIdentity,
@@ -42,7 +46,7 @@ public final class TourWorkspaceModel: ObservableObject {
         self.jobs = jobs; self.artifacts = artifacts; self.navigate = navigate
     }
 
-    deinit { generationTask?.cancel() }
+    deinit { generationTask?.cancel(); renderingTask?.cancel() }
 
     public var document: ValidatedTourDocument? { history?.selectedTour }
     public var canGenerate: Bool {
@@ -51,6 +55,8 @@ public final class TourWorkspaceModel: ObservableObject {
 
     public func load() async {
         status = .loading
+        discardRenderableContent()
+        unavailableDiagramKinds = []
         do {
             _ = try await jobs.resumePending()
             var snapshot = try await jobs.history(reviewID: reviewID, revision: revision)
@@ -61,18 +67,37 @@ public final class TourWorkspaceModel: ObservableObject {
                 snapshot = try await jobs.history(reviewID: reviewID, revision: revision)
             }
             history = snapshot
-            if let selected = snapshot.selectedTour {
-                try await prepareForRendering(selected)
-            } else {
-                discardRenderableContent()
-            }
             let selectedRun = snapshot.selectedTour.flatMap { selected in
                 snapshot.runs.first { $0.tourID == selected.id }
             }
             applyStatus(from: selectedRun ?? snapshot.runs.first)
+            unavailableDiagramKinds = unavailableDiagramKinds(for: snapshot.selectedTour, run: selectedRun)
+            prepareRendering(snapshot.selectedTour)
         } catch {
             discardRenderableContent()
             status = .failed("Tour history could not be loaded.")
+        }
+    }
+
+    /// Publishing a strictly validated persisted document must not wait for optional
+    /// rendering decoration (syntax spans and bounded diagram layout). In particular,
+    /// first-open fallback remains visible even if decoration is slow.
+    private func prepareRendering(_ document: ValidatedTourDocument?) {
+        renderingTask?.cancel()
+        guard let document else { return }
+        let documentID = document.id
+        renderingTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await prepareForRendering(document)
+            } catch is CancellationError {
+                return
+            } catch {
+                // The validated document remains visible. Unavailable rendering data is
+                // deliberately omitted rather than replaced with executable content.
+                guard self.document?.id == documentID else { return }
+                discardRenderableContent()
+            }
         }
     }
 
@@ -158,6 +183,18 @@ public final class TourWorkspaceModel: ObservableObject {
 
     private func allBlocks(_ document: ValidatedTourDocument) -> [TourBlock] {
         document.overview + document.chapters.flatMap(\.blocks)
+    }
+
+    private func unavailableDiagramKinds(
+        for document: ValidatedTourDocument?, run: TourRunRecord?
+    ) -> [DiagramKind] {
+        let available = Set(document.map(allBlocks)?.compactMap { block -> String? in
+            if case let .diagram(diagram) = block { return diagram.kind.rawValue }
+            return nil
+        } ?? [])
+        return (run?.diagramIntents ?? []).compactMap { intent in
+            intent.material && !available.contains(intent.kind.rawValue) ? intent.kind : nil
+        }
     }
 
     private func discardRenderableContent() {
@@ -294,10 +331,10 @@ public struct TourWorkspaceView: View {
                         .font(.caption).foregroundStyle(RTCDesign.color(.textSecondary))
                         Text("Context \(run.contextDigest.hex.prefix(12))")
                             .font(.caption2.monospaced()).foregroundStyle(RTCDesign.color(.textSecondary))
-                        ForEach(run.diagramIntents.filter(\.material), id: \.kind.rawValue) { intent in
+                        ForEach(model.unavailableDiagramKinds, id: \.rawValue) { kind in
                             Label(
-                                "\(intent.kind.rawValue) diagram material",
-                                systemImage: "point.3.connected.trianglepath.dotted"
+                                "\(kind.rawValue) diagram unavailable (no validated diagram)",
+                                systemImage: "exclamationmark.triangle"
                             )
                             .font(.caption).foregroundStyle(RTCDesign.color(.textSecondary))
                         }
