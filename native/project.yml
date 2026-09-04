@@ -395,6 +395,7 @@ targets:
   RTCUITests:
     type: bundle.ui-testing
     platform: macOS
-    sources: []
+    sources:
+      - Tests/TourWorkspaceUITests
     dependencies:
       - target: ReadTheCode

@@ -20,11 +20,17 @@ public struct ManifestTourArtifactSource: ExactArtifactSource, AnchorArtifactSou
         guard anchor.revision == manifest.revision,
             anchor.revision.reviewID == manifest.id,
             !anchor.path.hasPrefix("/"),
-            !anchor.path.split(separator: "/").contains(".."),
-            let file = manifest.files.first(where: { $0.path == anchor.path || $0.oldPath == anchor.path })
+            !anchor.path.split(separator: "/").contains("..")
         else {
             return false
         }
+        let file: DiffArtifact?
+        switch anchor.side {
+        case .new: file = manifest.files.first { $0.path == anchor.path }
+        case .old: file = manifest.files.first { $0.oldPath == anchor.path || $0.path == anchor.path }
+        case nil: file = manifest.files.first { $0.path == anchor.path || $0.oldPath == anchor.path }
+        }
+        guard let file else { return false }
         switch anchor.scope {
         case .general, .file:
             return anchor.startLine == nil && anchor.endLine == nil
@@ -34,40 +40,59 @@ public struct ManifestTourArtifactSource: ExactArtifactSource, AnchorArtifactSou
             return false
         case .hunk:
             guard let index = anchor.hunkIndex, file.hunks.indices.contains(index) else { return false }
-            guard let start = anchor.startLine, let end = anchor.endLine else { return true }
-            return range(start, end, isWithin: file.hunks[index])
+            guard let start = anchor.startLine, let end = anchor.endLine else { return anchor.side == nil }
+            guard let side = anchor.side else { return false }
+            return exactLines(
+                in: file.hunks[index], side: side, start: start, end: end,
+                startHash: anchor.startContextHash, endHash: anchor.endContextHash) != nil
         case .line:
             guard let side = anchor.side, let start = anchor.startLine, let end = anchor.endLine else { return false }
-            let candidates = file.hunks.flatMap(\.lines).filter { line in
-                guard let number = side == .new ? line.newLine : line.oldLine else { return false }
-                return (start...end).contains(number)
-            }
-            guard !candidates.isEmpty,
-                candidates.contains(where: { (side == .new ? $0.newLine : $0.oldLine) == start }),
-                candidates.contains(where: { (side == .new ? $0.newLine : $0.oldLine) == end })
-            else {
-                return false
-            }
-            if let expected = anchor.startContextHash,
-                candidates.first(where: { (side == .new ? $0.newLine : $0.oldLine) == start })?.contextHash != expected
-            {
-                return false
-            }
-            if let expected = anchor.endContextHash,
-                candidates.first(where: { (side == .new ? $0.newLine : $0.oldLine) == end })?.contextHash != expected
-            {
-                return false
-            }
-            return true
+            let available = file.hunks.flatMap(\.lines)
+            return exactLines(
+                in: available, side: side, start: start, end: end,
+                startHash: anchor.startContextHash, endHash: anchor.endContextHash) != nil
         }
     }
 
-    private func range(_ start: Int, _ end: Int, isWithin hunk: DiffHunk) -> Bool {
-        func contains(_ candidateStart: Int, _ count: Int) -> Bool {
-            guard count > 0 else { return false }
-            return start >= candidateStart && end <= candidateStart + count - 1
+    public func exactLines(for reference: DiffSliceReference) -> [DiffLine]? {
+        let file: DiffArtifact?
+        if reference.side == .new {
+            file = manifest.files.first { $0.path == reference.path }
+        } else {
+            file = manifest.files.first { $0.oldPath == reference.path || $0.path == reference.path }
         }
-        return contains(hunk.newStart, hunk.newLines) || contains(hunk.oldStart, hunk.oldLines)
+        guard let file, file.hunks.indices.contains(reference.hunkIndex) else { return nil }
+        return exactLines(
+            in: file.hunks[reference.hunkIndex], side: reference.side,
+            start: reference.startLine, end: reference.endLine,
+            startHash: reference.startContextHash, endHash: reference.endContextHash)
+    }
+
+    private func exactLines(
+        in hunk: DiffHunk, side: AnchorSide, start: Int, end: Int,
+        startHash: SHA256Digest?, endHash: SHA256Digest?
+    ) -> [DiffLine]? {
+        exactLines(
+            in: hunk.lines, side: side, start: start, end: end,
+            startHash: startHash, endHash: endHash)
+    }
+
+    private func exactLines(
+        in available: [DiffLine], side: AnchorSide, start: Int, end: Int,
+        startHash: SHA256Digest?, endHash: SHA256Digest?
+    ) -> [DiffLine]? {
+        guard start > 0, end >= start, end - start <= RTCConstants.maxPatchBytesPerFile else { return nil }
+        let candidates = available.filter { line in
+            guard let number = side == .new ? line.newLine : line.oldLine else { return false }
+            return number >= start && number <= end
+        }
+        let numbers = candidates.compactMap { side == .new ? $0.newLine : $0.oldLine }
+        guard numbers == Array(start...end), let first = candidates.first, let last = candidates.last else {
+            return nil
+        }
+        if let startHash, first.contextHash != startHash { return nil }
+        if let endHash, last.contextHash != endHash { return nil }
+        return candidates
     }
 }
 
@@ -83,7 +108,18 @@ public struct ResolvedDiffSlice: Sendable, Hashable {
 public protocol TourArtifactResolving: Sendable {
     func manifest(for revision: RevisionIdentity) async throws -> ReviewManifest
     func resolve(_ reference: DiffSliceReference, revision: RevisionIdentity) async throws -> ResolvedDiffSlice
+    func resolve(_ references: [DiffSliceReference], revision: RevisionIdentity) async throws -> [ResolvedDiffSlice]
     func layout(_ diagram: DiagramDocument) throws -> DiagramLayout
+}
+
+extension TourArtifactResolving {
+    public func resolve(_ references: [DiffSliceReference], revision: RevisionIdentity) async throws
+        -> [ResolvedDiffSlice]
+    {
+        var result: [ResolvedDiffSlice] = []
+        for reference in references { result.append(try await resolve(reference, revision: revision)) }
+        return result
+    }
 }
 
 public struct ExactTourArtifactResolver: TourArtifactResolving, ExactArtifactSource, Sendable {
@@ -107,24 +143,36 @@ public struct ExactTourArtifactResolver: TourArtifactResolving, ExactArtifactSou
 
     public func resolve(_ reference: DiffSliceReference, revision: RevisionIdentity) async throws -> ResolvedDiffSlice {
         let manifest = try await manifest(for: revision)
+        return try await resolve(reference, manifest: manifest)
+    }
+
+    public func resolve(_ references: [DiffSliceReference], revision: RevisionIdentity) async throws
+        -> [ResolvedDiffSlice]
+    {
+        let manifest = try await manifest(for: revision)
+        var result: [ResolvedDiffSlice] = []
+        for reference in references { result.append(try await resolve(reference, manifest: manifest)) }
+        return result
+    }
+
+    private func resolve(_ reference: DiffSliceReference, manifest: ReviewManifest) async throws -> ResolvedDiffSlice {
+        let revision = manifest.revision
         let source = ManifestTourArtifactSource(manifest: manifest)
         let anchor = try ReviewAnchor(
             revision: revision, path: reference.path, scope: .hunk,
+            side: reference.side,
             startLine: reference.startLine, endLine: reference.endLine,
+            startContextHash: reference.startContextHash,
+            endContextHash: reference.endContextHash,
             hunkIndex: reference.hunkIndex)
         guard try await source.validate(anchor),
-            let file = manifest.files.first(where: { $0.path == reference.path || $0.oldPath == reference.path }),
-            file.hunks.indices.contains(reference.hunkIndex)
+            let file = manifest.files.first(where: {
+                reference.side == .new
+                    ? $0.path == reference.path : ($0.oldPath == reference.path || $0.path == reference.path)
+            }), let lines = source.exactLines(for: reference)
         else {
             throw TourIntegrationError.invalidPayload
         }
-        let hunk = file.hunks[reference.hunkIndex]
-        let lines = hunk.lines.filter { line in
-            [line.newLine, line.oldLine].compactMap { $0 }.contains {
-                (reference.startLine...reference.endLine).contains($0)
-            }
-        }
-        guard !lines.isEmpty else { throw TourIntegrationError.invalidPayload }
         let sourceText = lines.map(\.text).joined(separator: "\n")
         let digest = SHA256Digest(data: Data(sourceText.utf8))
         let spans =

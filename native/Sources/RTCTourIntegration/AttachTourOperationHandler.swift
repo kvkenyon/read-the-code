@@ -17,11 +17,13 @@ public struct AttachTourOperationHandler: IPCOperationHandler {
             return failure(request, code: .invalidJSON, message: "Invalid attachTour payload.")
         }
         do {
-            let document = try StrictTourDecoder.decode(payload)
-            guard document.revision.reviewID == reviewID else {
+            let envelope = try StrictTourDecoder.decodeWorkerEnvelope(payload)
+            guard envelope.document.revision.reviewID == reviewID else {
                 return failure(request, code: .invalidRevision, message: "Tour revision does not match the review.")
             }
-            let run = await jobs.attach(document, reviewID: reviewID)
+            let run = try await jobs.attachPayload(
+                envelope.rawDocumentPayload, reviewID: reviewID,
+                attribution: envelope.attribution)
             guard run.state == .succeeded else {
                 return failure(
                     request, code: run.failureCode ?? .tourRejected,
@@ -31,6 +33,10 @@ public struct AttachTourOperationHandler: IPCOperationHandler {
             return IPCResponse(
                 schemaVersion: RTCConstants.schemaVersion, requestID: request.id,
                 ok: true, error: nil, payload: response)
+        } catch TourIntegrationError.readOnlyReview {
+            return failure(request, code: .staleRevision, message: "This exact review revision is read-only.")
+        } catch TourIntegrationError.tourIDConflict {
+            return failure(request, code: .tourIDConflict, message: "Tour ID conflicts with existing provenance.")
         } catch {
             return failure(request, code: .tourRejected, message: "Tour rejected by strict decoding.")
         }
