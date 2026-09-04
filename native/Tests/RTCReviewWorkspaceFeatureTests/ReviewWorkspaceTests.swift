@@ -1,9 +1,11 @@
+import AppKit
 import Foundation
 import RTCContracts
 import RTCDiffCanvas
 import RTCDomain
 import RTCReview
 import RTCReviewWorkspace
+import SwiftUI
 
 private struct Source: AnchorArtifactSource { func validate(_ anchor: ReviewAnchor) async throws -> Bool { true } }
 
@@ -21,6 +23,7 @@ private struct Source: AnchorArtifactSource { func validate(_ anchor: ReviewAnch
         let handler = try await ReviewCommandHandler.open(manifest: manifest, repository: repository, anchors: Source(), mutationPreflight: FixedReviewMutationPreflight(headSHA: revision.headSHA))
         let model = ReviewWorkspaceModel(revision: revision, files: [CanvasFile(artifact: artifact)], handler: handler)
         await model.refresh()
+        try mountedCanvasRetainsControllerAndEnablesComment(model: model, artifact: artifact)
         let tourSelection = CanvasSelection(path: artifact.path, side: .new, startLine: 8, endLine: 8)
         model.navigate(to: tourSelection)
         precondition(model.selection == tourSelection && model.navigationRequest?.selection == tourSelection)
@@ -53,4 +56,42 @@ private struct Source: AnchorArtifactSource { func validate(_ anchor: ReviewAnch
         precondition(snapshot.status == .approved && snapshot.threads.first?.anchor == anchor && snapshot.progress.first?.viewed == true, "workspace state survives restart")
         print("RTC review workspace feature checks passed")
     }
+
+    @MainActor private static func mountedCanvasRetainsControllerAndEnablesComment(model: ReviewWorkspaceModel, artifact: DiffArtifact) throws {
+        let mountedAt = ContinuousClock.now
+        let host = NSHostingView(rootView: RTCReviewWorkspaceView(model: model))
+        host.frame = NSRect(x: 0, y: 0, width: 1_200, height: 900)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        host.layoutSubtreeIfNeeded()
+
+        guard let canvas = descendant(of: host, as: NSCollectionView.self) else {
+            throw FeatureFailure.failed("mounted workspace did not create a collection view")
+        }
+        let diffReady = mountedAt.duration(to: .now)
+        precondition(canvas.numberOfSections > 0 && canvas.numberOfItems(inSection: 0) > 0, "mounted workspace bridge must retain nonzero diff canvas items")
+        guard let controller = canvas.delegate as? ReviewCanvasController else {
+            throw FeatureFailure.failed("mounted workspace lost its canvas controller")
+        }
+
+        let interactionAt = ContinuousClock.now
+        controller.collectionView(canvas, didSelectItemsAt: [IndexPath(item: 1, section: 0)])
+        let firstInteraction = interactionAt.duration(to: .now)
+        precondition(model.selection?.path == artifact.path, "mounted canvas line navigation must select exact diff evidence")
+        model.openComposer()
+        precondition(model.composer?.selection == model.selection, "Comment must enable after mounted canvas line selection")
+        precondition(diffReady < .seconds(2), "mounted diff-ready timing exceeded twice the captured 0.746-second baseline: \(diffReady)")
+        precondition(firstInteraction < .seconds(1), "mounted first-interaction timing exceeded budget: \(firstInteraction)")
+        print("RTC mounted canvas diff-ready \(diffReady); first-interaction \(firstInteraction)")
+    }
+
+    @MainActor private static func descendant<T: NSView>(of root: NSView, as type: T.Type) -> T? {
+        if let match = root as? T { return match }
+        for child in root.subviews {
+            if let match = descendant(of: child, as: type) { return match }
+        }
+        return nil
+    }
 }
+
+private enum FeatureFailure: Error { case failed(String) }

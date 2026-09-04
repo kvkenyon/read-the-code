@@ -368,7 +368,7 @@ private struct ReviewCanvasHost: NSViewRepresentable {
         }
     }
     final class Coordinator: NSObject, ReviewCanvasDelegate {
-        weak var controller: ReviewCanvasController?
+        var controller: ReviewCanvasController?
         var model: ReviewWorkspaceModel
         var lastNavigationID: UUID?
         init(model: ReviewWorkspaceModel) { self.model=model }
