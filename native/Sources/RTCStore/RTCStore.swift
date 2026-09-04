@@ -76,15 +76,13 @@ public actor SQLiteStore {
         try db.writeWithoutTransaction { db in
             try db.execute(
                 sql: "CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, checksum TEXT NOT NULL);")
-            let checksum = SHA256.hash(data: Data(Migration.v1.utf8)).map { String(format: "%02x", $0) }.joined()
-            let existing = try String.fetchOne(db, sql: "SELECT checksum FROM schema_migrations WHERE id = 1")
-            if let existing, existing != checksum { throw RTCStoreError.corrupt("migration checksum") }
-            if existing == nil {
-                try db.inTransaction {
-                    try db.execute(sql: Migration.v1)
-                    try db.execute(
-                        sql: "INSERT INTO schema_migrations (id, checksum) VALUES (1, ?)", arguments: [checksum])
-                    return .commit
+            for (id, sql) in [(1, Migration.v1), (2, Migration.v2), (3, Migration.v3)] {
+                let checksum = SHA256.hash(data: Data(sql.utf8)).map { String(format: "%02x", $0) }.joined()
+                let existing = try String.fetchOne(db, sql: "SELECT checksum FROM schema_migrations WHERE id = ?", arguments: [id])
+                if let existing, existing != checksum { throw RTCStoreError.corrupt("migration checksum") }
+                if existing == nil {
+                    try db.execute(sql: sql)
+                    try db.execute(sql: "INSERT INTO schema_migrations (id, checksum) VALUES (?, ?)", arguments: [id, checksum])
                 }
             }
             let result = try String.fetchOne(db, sql: "PRAGMA integrity_check")
@@ -168,6 +166,93 @@ public final class SQLiteEventRepository: EventRepository, @unchecked Sendable {
         }
     }
 
+}
+
+/// Private SQLite-backed replay log. Event/request identities make delivery and
+/// retried replies idempotent without exposing conversation state to a repo.
+public final class SQLiteConversationEventRepository: ConversationReplayRepository, ConversationRequestJournal, @unchecked Sendable {
+    private let store: SQLiteStore
+    private static let maximumEventBytes = 256 * 1024
+    public init(store: SQLiteStore) { self.store = store }
+
+    public func append(_ event: ConversationEvent) async throws {
+        let data = try JSONEncoder.rtc.encode(event)
+        guard data.count <= Self.maximumEventBytes else { throw RTCStoreError.corrupt("conversation event limit") }
+        try await store.write { db in
+            try self.bind(db, reviewID: event.reviewID, conversationID: event.conversationID)
+            if let existing = try Data.fetchOne(db, sql: "SELECT payload FROM conversation_events WHERE event_id = ?", arguments: [event.id.uuidString]) {
+                guard try JSONDecoder.rtc.decode(ConversationEvent.self, from: existing) == event else { throw RTCStoreError.corrupt("conversation event id collision") }
+                return
+            }
+            let next = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(sequence), 0) + 1 FROM conversation_events WHERE conversation_id = ?", arguments: [event.conversationID.uuidString])) ?? 1
+            guard event.sequence == next else { throw RTCStoreError.corrupt("conversation sequence") }
+            try db.execute(sql: "INSERT INTO conversation_events (conversation_id, sequence, event_id, payload) VALUES (?, ?, ?, ?)", arguments: [event.conversationID.uuidString, event.sequence, event.id.uuidString, data])
+        }
+    }
+
+    public func replay(reviewID: ReviewID, conversationID: UUID, after sequence: Int) async throws -> [ConversationEvent] {
+        guard sequence >= 0 else { throw RTCStoreError.corrupt("negative conversation cursor") }
+        return try await store.read { db in
+            try self.requireBinding(db, reviewID: reviewID, conversationID: conversationID)
+            return try Data.fetchAll(db, sql: "SELECT payload FROM conversation_events WHERE conversation_id = ? AND sequence > ? ORDER BY sequence", arguments: [conversationID.uuidString, sequence]).map {
+                let event = try JSONDecoder.rtc.decode(ConversationEvent.self, from: $0)
+                guard event.reviewID == reviewID else { throw RTCStoreError.corrupt("conversation review mismatch") }
+                return event
+            }
+        }
+    }
+
+    public func state(reviewID: ReviewID, conversationID: UUID) async throws -> [ConversationEvent] {
+        try await store.read { db in
+            guard let binding = try String.fetchOne(db, sql: "SELECT review_id FROM conversations WHERE id = ?", arguments: [conversationID.uuidString]) else { return [] }
+            guard binding == reviewID.value else { throw RTCStoreError.corrupt("conversation scope") }
+            return try Data.fetchAll(db, sql: "SELECT payload FROM conversation_events WHERE conversation_id = ? ORDER BY sequence", arguments: [conversationID.uuidString]).map { try JSONDecoder.rtc.decode(ConversationEvent.self, from: $0) }
+        }
+    }
+
+    public func page(reviewID: ReviewID, conversationID: UUID, after: Int, maximumEvents: Int, maximumBytes: Int) async throws -> ConversationPage {
+        guard after >= 0, maximumEvents > 0, maximumBytes > 0 else { throw RTCStoreError.corrupt("invalid conversation page") }
+        return try await store.read { db in
+            try self.requireBinding(db, reviewID: reviewID, conversationID: conversationID)
+            let last = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?", arguments: [conversationID.uuidString])) ?? 0
+            guard after <= last else { throw RTCStoreError.corrupt("conversation cursor ahead") }
+            let rows = try Data.fetchAll(db, sql: "SELECT payload FROM conversation_events WHERE conversation_id = ? AND sequence > ? ORDER BY sequence LIMIT ?", arguments: [conversationID.uuidString, after, maximumEvents + 1])
+            var bytes = 0; var events: [ConversationEvent] = []; var hasMore = rows.count > maximumEvents
+            for data in rows.prefix(maximumEvents) {
+                guard data.count <= maximumBytes - bytes else { hasMore = true; break }
+                events.append(try JSONDecoder.rtc.decode(ConversationEvent.self, from: data)); bytes += data.count
+            }
+            return ConversationPage(after: after, nextCursor: events.last?.sequence ?? after, events: events, hasMore: hasMore)
+        }
+    }
+
+    public func commit(reviewID: ReviewID, conversationID: UUID, requestID: UUID, operation: String, payloadDigest: RTCContracts.SHA256Digest, events: [ConversationEvent]) async throws -> ConversationRequestCommit {
+        try await store.write { db in
+            if let row = try Row.fetchOne(db, sql: "SELECT operation, payload_digest, response FROM conversation_requests WHERE review_id = ? AND conversation_id = ? AND request_id = ?", arguments: [reviewID.value, conversationID.uuidString, requestID.uuidString]) {
+                guard row["operation"] as String == operation, row["payload_digest"] as String == payloadDigest.hex else { throw RTCStoreError.corrupt("conversation request conflict") }
+                return ConversationRequestCommit(events: try JSONDecoder.rtc.decode([ConversationEvent].self, from: row["response"] as Data), reused: true)
+            }
+            try self.bind(db, reviewID: reviewID, conversationID: conversationID)
+            let last = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?", arguments: [conversationID.uuidString])) ?? 0
+            guard !events.isEmpty, events.enumerated().allSatisfy({ $0.element.reviewID == reviewID && $0.element.conversationID == conversationID && $0.element.sequence == last + $0.offset + 1 }) else { throw RTCStoreError.corrupt("conversation request sequence") }
+            for event in events {
+                let encoded = try JSONEncoder.rtc.encode(event)
+                guard encoded.count <= Self.maximumEventBytes else { throw RTCStoreError.corrupt("conversation event limit") }
+                try db.execute(sql: "INSERT INTO conversation_events (conversation_id, sequence, event_id, payload) VALUES (?, ?, ?, ?)", arguments: [conversationID.uuidString, event.sequence, event.id.uuidString, encoded])
+            }
+            let response = try JSONEncoder.rtc.encode(events)
+            try db.execute(sql: "INSERT INTO conversation_requests (review_id, conversation_id, request_id, operation, payload_digest, response, first_sequence, last_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", arguments: [reviewID.value, conversationID.uuidString, requestID.uuidString, operation, payloadDigest.hex, response, events.first!.sequence, events.last!.sequence])
+            return ConversationRequestCommit(events: events, reused: false)
+        }
+    }
+
+    private func bind(_ db: Database, reviewID: ReviewID, conversationID: UUID) throws {
+        if let existing = try String.fetchOne(db, sql: "SELECT review_id FROM conversations WHERE id = ?", arguments: [conversationID.uuidString]) { guard existing == reviewID.value else { throw RTCStoreError.corrupt("conversation scope") }; return }
+        try db.execute(sql: "INSERT INTO conversations (id, review_id, payload) VALUES (?, ?, ?)", arguments: [conversationID.uuidString, reviewID.value, Data()])
+    }
+    private func requireBinding(_ db: Database, reviewID: ReviewID, conversationID: UUID) throws {
+        guard let existing = try String.fetchOne(db, sql: "SELECT review_id FROM conversations WHERE id = ?", arguments: [conversationID.uuidString]), existing == reviewID.value else { throw RTCStoreError.corrupt("conversation scope") }
+    }
 }
 
 public final class JobQueue: JobRepository, @unchecked Sendable {
@@ -362,4 +447,17 @@ private enum Migration {
         CREATE TABLE conversation_events (conversation_id TEXT NOT NULL, sequence INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL, PRIMARY KEY(conversation_id, sequence));
         CREATE TABLE settings (key TEXT PRIMARY KEY, value BLOB NOT NULL);
         """
+    static let v2 = """
+    CREATE INDEX IF NOT EXISTS conversation_events_replay ON conversation_events(conversation_id, sequence);
+    """
+    static let v3 = """
+    INSERT OR IGNORE INTO conversations (id, review_id, payload)
+      SELECT conversation_id,
+        CASE json_type(CAST(payload AS TEXT), '$.reviewID')
+          WHEN 'object' THEN json_extract(CAST(payload AS TEXT), '$.reviewID.value')
+          ELSE json_extract(CAST(payload AS TEXT), '$.reviewID') END,
+        X'' FROM conversation_events GROUP BY conversation_id;
+    CREATE TABLE conversation_requests (review_id TEXT NOT NULL, conversation_id TEXT NOT NULL, request_id TEXT NOT NULL, operation TEXT NOT NULL, payload_digest TEXT NOT NULL, response BLOB NOT NULL, first_sequence INTEGER NOT NULL, last_sequence INTEGER NOT NULL, PRIMARY KEY(review_id, conversation_id, request_id), FOREIGN KEY(conversation_id) REFERENCES conversations(id));
+    CREATE INDEX conversation_requests_lookup ON conversation_requests(review_id, conversation_id, request_id);
+    """
 }

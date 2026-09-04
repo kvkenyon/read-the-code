@@ -68,9 +68,12 @@ public struct ReviewID: Codable, Hashable, Sendable {
         self.value = value.lowercased()
     }
     public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let scalar = try? decoder.singleValueContainer().decode(String.self) { try self.init(scalar); return }
+        let c = try decoder.container(keyedBy: LegacyCodingKeys.self)
         try self.init(c.decode(String.self, forKey: .value))
     }
+    public func encode(to encoder: Encoder) throws { try value.encode(to: encoder) }
+    private enum LegacyCodingKeys: String, CodingKey { case value }
 }
 
 public enum AnchorScope: String, Codable, Sendable { case line, file, general, hunk, symbol }
@@ -485,6 +488,25 @@ public protocol EventRepository: Sendable {
 public protocol ConversationEventRepository: Sendable {
     func append(_ event: ConversationEvent) async throws;
     func replay(reviewID: ReviewID, conversationID: UUID, after sequence: Int) async throws -> [ConversationEvent]
+}
+public struct ConversationPage: Codable, Hashable, Sendable {
+    public let after: Int, nextCursor: Int, events: [ConversationEvent], hasMore: Bool
+    public init(after: Int, nextCursor: Int, events: [ConversationEvent], hasMore: Bool) { self.after=after; self.nextCursor=nextCursor; self.events=events; self.hasMore=hasMore }
+}
+public protocol ConversationReplayRepository: ConversationEventRepository {
+    func page(reviewID: ReviewID, conversationID: UUID, after: Int, maximumEvents: Int, maximumBytes: Int) async throws -> ConversationPage
+    func state(reviewID: ReviewID, conversationID: UUID) async throws -> [ConversationEvent]
+}
+public extension ConversationReplayRepository {
+    func page(reviewID: ReviewID, conversationID: UUID, after: Int, maximumEvents: Int, maximumBytes: Int) async throws -> ConversationPage {
+        let values = try await replay(reviewID: reviewID, conversationID: conversationID, after: after)
+        let selected = Array(values.prefix(maximumEvents)); return ConversationPage(after: after, nextCursor: selected.last?.sequence ?? after, events: selected, hasMore: values.count > selected.count)
+    }
+    func state(reviewID: ReviewID, conversationID: UUID) async throws -> [ConversationEvent] { try await replay(reviewID: reviewID, conversationID: conversationID, after: 0) }
+}
+public struct ConversationRequestCommit: Sendable { public let events: [ConversationEvent], reused: Bool; public init(events: [ConversationEvent], reused: Bool) { self.events=events; self.reused=reused } }
+public protocol ConversationRequestJournal: Sendable {
+    func commit(reviewID: ReviewID, conversationID: UUID, requestID: UUID, operation: String, payloadDigest: SHA256Digest, events: [ConversationEvent]) async throws -> ConversationRequestCommit
 }
 public protocol IPCOperationHandler: Sendable { func handle(_ request: IPCRequest) async -> IPCResponse }
 public protocol AnchorArtifactSource: Sendable { func validate(_ anchor: ReviewAnchor) async throws -> Bool }

@@ -74,12 +74,12 @@ let package = Package(
             path: "Features/TourWorkspace"
         ),
         .target(name: "RTCModelAdapters", dependencies: ["RTCContracts"]),
-        .target(name: "RTCAgentChat", dependencies: ["RTCContracts"]),
+        .target(name: "RTCAgentChat", dependencies: ["RTCContracts", "RTCIPC"]),
         .target(name: "RTCReview", dependencies: ["RTCContracts", "RTCDomain"]),
         .target(name: "RTCDesign"),
         .target(name: "RTCLifecycle", dependencies: ["RTCContracts"]),
         .target(name: "RTCSettings", dependencies: ["RTCContracts", "RTCModelAdapters", "RTCLifecycle"]),
-        .target(name: "RTCWorkspaceShell", dependencies: ["RTCDesign"]),
+        .target(name: "RTCWorkspaceShell", dependencies: ["RTCDesign", "RTCContracts", "RTCAgentChat"]),
         .target(name: "RTCReviewWorkspace", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCSyntax", "RTCDiffCanvas", "RTCDesign", "RTCWorkspaceShell"]),
         .target(
             name: "RTCCLI",
@@ -146,6 +146,7 @@ let package = Package(
         .executableTarget(name: "RTCDiffCanvasTests", dependencies: ["RTCContracts", "RTCDiffCanvas"], path: "Tests/RTCDiffCanvasTests"),
         .executableTarget(name: "RTCDomainTests", dependencies: ["RTCContracts", "RTCDomain"], path: "Tests/RTCDomainTests"),
         .executableTarget(name: "RTCIPCTests", dependencies: ["RTCContracts", "RTCIPC"], path: "Tests/RTCIPCTests"),
+        .executableTarget(name: "RTCAgentChatSmokeTests", dependencies: ["RTCContracts", "RTCStore", "RTCIPC", "RTCAgentChat"], path: "Tests/RTCAgentChatSmokeTests"),
         .executableTarget(name: "RTCLifecycleTests", dependencies: ["RTCContracts", "RTCLifecycle"], path: "Tests/RTCLifecycleTests"),
         .executableTarget(name: "RTCReviewTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview"], path: "Tests/RTCReviewTests"),
         .executableTarget(name: "RTCReviewPersistenceTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCStore"], path: "Tests/RTCReviewPersistenceTests"),

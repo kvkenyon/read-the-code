@@ -120,6 +120,20 @@ Errors have this shape:
 
 Source TypeScript definitions are authoritative in [`src/protocol.ts`](../src/protocol.ts).
 
+## Native agent conversation IPC
+
+The native app's private same-UID IPC conversation capability is separate from
+the loopback review protocol. It is scoped only to polling, replies, availability,
+and acknowledgement; it cannot approve, request changes, close a review, or
+mutate review evidence. The length-prefixed transport frame is capped at 4 MiB,
+and this chat surface caps decoded operation payloads at 128 KB. Reply UUIDs
+are durably journaled with an operation/payload digest; exact retries reuse the
+stored result and conflicting reuse is rejected. Conversation pages replay from
+private durable state after either endpoint restarts. Errors and status are
+generic and never expose capabilities, paths, credentials, or prompt content.
+Promotion creates only a proposed payload; the existing anchored review mutation
+path must validate and explicitly apply any review effect.
+
 ## Native schema-version 2 review log
 
 The native review workspace uses the contracts in `native/Sources/RTCContracts/Contracts.swift`. Its immutable `ReviewManifest` fixes the repository path and exact base/head commit pair. Workspace state is reconstructed by replaying `review_events` in contiguous per-review sequence order; a gap, duplicate event ID, wrong review/revision, malformed payload, invalid anchor, or illegal transition fails closed.

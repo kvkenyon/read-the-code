@@ -25,17 +25,53 @@ final class AgentChatCoordinatorTests: XCTestCase {
         XCTAssertTrue(beforeFlush.isEmpty)
         try await coordinator.flushWake()
         let afterFlush = await wake.values()
-        XCTAssertEqual(afterFlush, [2])
+        XCTAssertEqual(afterFlush, [3])
+    }
+
+    func testOperationRetriesAreIdempotentAndConversationBound() async throws {
+        let reviewID = try ReviewID("0123456789abcdef01234567")
+        let conversationID = UUID()
+        let repository = MemoryRepository()
+        let coordinator = AgentChatCoordinator(reviewID: reviewID, conversationID: conversationID, repository: repository, wakeSink: NoopWake())
+        let handler = AgentChatOperationHandler(coordinator: coordinator, journal: repository)
+        let body = try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString("one reply"))])
+        let payload = try JSONEncoder().encode(ConversationAvailabilityRequest(conversationID: conversationID, availability: .online))
+        let online = IPCRequest(schemaVersion: 2, id: UUID(), operation: BoundedString("setConversationAvailability"), reviewID: reviewID, payload: payload)
+        XCTAssertTrue((await handler.handle(online)).ok)
+        let replyPayload = try JSONEncoder().encode(ConversationReplyRequest(conversationID: conversationID, body: body))
+        let request = IPCRequest(schemaVersion: 2, id: UUID(), operation: BoundedString("postConversationReply"), reviewID: reviewID, payload: replyPayload)
+        let first = await handler.handle(request)
+        let retry = await handler.handle(request)
+        XCTAssertTrue(first.ok); XCTAssertEqual(first.payload, retry.payload)
+        let snapshot = try await coordinator.replay()
+        XCTAssertEqual(snapshot.events.filter { $0.kind == .assistantMessageStarted }.count, 1)
+        let invalidPayload = try JSONEncoder().encode(ConversationPollRequest(conversationID: UUID(), after: 0))
+        let invalid = IPCRequest(schemaVersion: 2, id: UUID(), operation: BoundedString("pollConversationEvents"), reviewID: reviewID, payload: invalidPayload)
+        XCTAssertFalse((await handler.handle(invalid)).ok)
+    }
+
+    func testPromotionIsOnlyAProposalAndDoesNotMutateTheConversation() async throws {
+        let reviewID = try ReviewID("0123456789abcdef01234567")
+        let coordinator = AgentChatCoordinator(reviewID: reviewID, conversationID: UUID(), repository: MemoryRepository(), wakeSink: NoopWake())
+        let body = try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString("proposed review comment"))])
+        let queued = try await coordinator.queueMessage(body)
+        let proposal = try await coordinator.promoteMessage(sequence: queued.cursor)
+        let afterPromotion = try await coordinator.replay()
+
+        XCTAssertEqual(proposal.body, body)
+        XCTAssertEqual(proposal.sequence, queued.cursor)
+        XCTAssertEqual(afterPromotion.events.count, queued.events.count, "promotion is not a review or conversation mutation")
     }
 }
 
-private actor MemoryRepository: ConversationEventRepository {
+private actor MemoryRepository: ConversationReplayRepository, ConversationRequestJournal {
     var events: [ConversationEvent]
     init(events: [ConversationEvent] = []) { self.events = events }
     func append(_ event: ConversationEvent) async throws { events.append(event) }
     func replay(reviewID: ReviewID, conversationID: UUID, after sequence: Int) async throws -> [ConversationEvent] {
         events.filter { $0.reviewID == reviewID && $0.conversationID == conversationID && $0.sequence > sequence }
     }
+    func commit(reviewID: ReviewID, conversationID: UUID, requestID: UUID, operation: String, payloadDigest: SHA256Digest, events: [ConversationEvent]) async throws -> ConversationRequestCommit { self.events.append(contentsOf: events); return ConversationRequestCommit(events: events, reused: false) }
 }
 
 private actor RecordingWake: WakeSink {
