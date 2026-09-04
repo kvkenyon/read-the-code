@@ -473,12 +473,13 @@ public actor TourGenerationJobHandler {
                 await self.recordProgress(jobID: job.id, progress: value, sink: progress)
             }
             try await checkpoint(.modelResponse)
-            guard !cancelledJobs.contains(job.id) else { throw CancellationError() }
+            guard !cancellationWasRequested(for: job.id) else { throw CancellationError() }
             if progressPersistenceFailures.contains(job.id) { throw TourIntegrationError.persistenceFailed }
             let validated = try await boundary.validate(
                 rawPayload: raw, against: request.revision, expectedInputDigest: pack.digest,
                 anchors: source, provenance: .init(provider: request.provider))
             try await checkpoint(.validated)
+            guard !cancellationWasRequested(for: job.id) else { throw CancellationError() }
             let issues = logicIssues(document: validated.document, intents: intents)
             guard issues.isEmpty else {
                 return try await fallback(
@@ -500,7 +501,7 @@ public actor TourGenerationJobHandler {
         } catch let error as TourIntegrationError where error == .persistenceFailed {
             cleanup(job.id); throw error
         } catch {
-            if cancelledJobs.contains(job.id) { return try await cancelled(run, jobID: job.id) }
+            if cancellationWasRequested(for: job.id) { return try await cancelled(run, jobID: job.id) }
             return try await fallback(
                 run: run, job: job, pack: pack, source: source,
                 reason: safeProviderFailure(error), issues: [])
@@ -512,7 +513,7 @@ public actor TourGenerationJobHandler {
         source: ManifestTourArtifactSource, reason: String,
         issues: [TourValidationIssue]
     ) async throws -> TourRunRecord {
-        if cancelledJobs.contains(job.id) { return try await cancelled(run, jobID: job.id) }
+        if cancellationWasRequested(for: job.id) { return try await cancelled(run, jobID: job.id) }
         let failedAttempt = TourProviderAttempt(
             provider: run.provider, startedAt: run.providerAttempts.first?.startedAt ?? run.createdAt,
             completedAt: Date(), failureReason: reason)
@@ -526,6 +527,7 @@ public actor TourGenerationJobHandler {
             let validated = try await boundary.validate(
                 rawPayload: raw, against: run.revision, expectedInputDigest: pack.digest,
                 anchors: source, provenance: .init(provider: .fallback))
+            if cancellationWasRequested(for: job.id) { return try await cancelled(run, jobID: job.id) }
             let fallbackAttempt = TourProviderAttempt(
                 provider: .fallback, startedAt: Date(), completedAt: Date())
             let completed = run.updating(
@@ -537,6 +539,7 @@ public actor TourGenerationJobHandler {
                 validated, attachment: nil, finishing: completed, jobState: .succeeded)
             cleanup(job.id); return completed
         } catch {
+            if cancellationWasRequested(for: job.id) { return try await cancelled(run, jobID: job.id) }
             let failed = run.updating(
                 state: .failed, progress: .init(phase: "failed", fraction: 1),
                 completedAt: Date(), fallbackReason: reason, failureCode: .tourRejected,
@@ -639,6 +642,10 @@ public actor TourGenerationJobHandler {
     private func cleanup(_ jobID: UUID) {
         activeProviders[jobID] = nil; activeRuns[jobID] = nil
         cancelledJobs.remove(jobID); progressPersistenceFailures.remove(jobID)
+    }
+
+    private func cancellationWasRequested(for jobID: UUID) -> Bool {
+        Task.isCancelled || cancelledJobs.contains(jobID)
     }
 
     private func safeProviderFailure(_ error: Error) -> String {

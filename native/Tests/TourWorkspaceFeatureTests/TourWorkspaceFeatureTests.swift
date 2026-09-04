@@ -658,9 +658,10 @@ struct TourWorkspaceFeatureTests {
         let store = try SQLiteStore(rootURL: root)
         let persistence = SQLiteTourPersistence(store: store)
         let artifacts = ExactTourArtifactResolver(git: FakeGit(manifest: fixture.manifest()))
+        let transport = SlowTransport()
         let jobs = TourGenerationJobHandler(
             persistence: persistence, jobs: JobQueue(store: store),
-            artifacts: artifacts, transport: SlowTransport())
+            artifacts: artifacts, transport: transport)
         let configuration = try LocalTourConfiguration(
             kind: .ollama,
             endpoint: try LoopbackEndpoint(URL(string: "http://127.0.0.1:11434")!),
@@ -671,13 +672,19 @@ struct TourWorkspaceFeatureTests {
                 reviewID: fixture.revision.reviewID,
                 revision: fixture.revision, configuration: configuration)
         }
-        try await Task.sleep(for: .milliseconds(30))
+        await transport.waitUntilRequested()
         generation.cancel()
-        try await jobs.cancel(reviewID: fixture.revision.reviewID)
+        // Force task cancellation to be classified before the separate review-job
+        // cancellation can populate the handler's cancellation side table.
         let run = try await generation.value
-        try expect(run.state == .cancelled, "cancellation fell through to fallback or failure")
+        try await jobs.cancel(reviewID: fixture.revision.reviewID)
+        try expect(
+            run.state == .cancelled,
+            "cancellation fell through to \(run.state.rawValue), tourID=\(String(describing: run.tourID)), reason=\(String(describing: run.fallbackReason))")
         let history = try await jobs.history(reviewID: fixture.revision.reviewID)
         try expect(history.runs.first?.state == .cancelled, "cancelled run was not persisted explicitly")
+        try expect(run.tourID == nil, "cancelled run retained a renderable tour")
+        try expect(history.selectedTour == nil && history.tours.isEmpty, "cancelled generation published a partial tour")
     }
 }
 
@@ -818,15 +825,23 @@ private struct StaticReviewStateSource: TourReviewStateSource {
     }
 }
 
-private struct SlowTransport: ModelHTTPTransport {
+private final class SlowTransport: ModelHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var requested = false
+
     func send(_ request: URLRequest, limits: ModelLimits) async throws -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+        lock.withLock { requested = true }
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 try? await Task.sleep(for: .seconds(1))
                 if !Task.isCancelled { continuation.finish(throwing: ModelAdapterError.timedOut) }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    func waitUntilRequested() async {
+        while !lock.withLock({ requested }) { await Task.yield() }
     }
 }
 
