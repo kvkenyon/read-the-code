@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import RTCContracts
 
 public enum GitEngineError: Error, Equatable, Sendable {
@@ -35,9 +36,10 @@ public extension GitProcessRunning {
 
 private final class ProcessBox: @unchecked Sendable {
     let lock = NSLock()
-    var process: Process?
-    func set(_ process: Process) { lock.lock(); self.process = process; lock.unlock() }
-    func terminate() { lock.lock(); process?.terminate(); lock.unlock() }
+    var pid: pid_t?
+    func set(_ pid: pid_t) { lock.lock(); self.pid = pid; lock.unlock() }
+    func clear(_ completedPID: pid_t) { lock.lock(); if pid == completedPID { pid = nil }; lock.unlock() }
+    func terminate() { lock.lock(); if let pid { kill(pid, SIGTERM); self.pid = nil }; lock.unlock() }
 }
 
 public struct SystemGitProcessRunner: GitProcessRunning {
@@ -48,9 +50,6 @@ public struct SystemGitProcessRunner: GitProcessRunning {
         let box = ProcessBox()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: Self.executable)
-                process.arguments = ["-C", repository] + arguments
                 var policyEnvironment = [
                     "PATH": "/usr/bin:/bin",
                     "HOME": "/var/empty",
@@ -62,40 +61,90 @@ public struct SystemGitProcessRunner: GitProcessRunning {
                     "GIT_OPTIONAL_LOCKS": "0",
                 ]
                 if let attributesSource = environment["GIT_ATTR_SOURCE"] { policyEnvironment["GIT_ATTR_SOURCE"] = attributesSource }
-                process.environment = policyEnvironment
-                let out = Pipe(), err = Pipe()
-                process.standardOutput = out; process.standardError = err
-                box.set(process)
-                let state = OutputState(limit: outputLimit, continuation: continuation, process: process)
-                out.fileHandleForReading.readabilityHandler = { state.append($0.availableData, to: .stdout) }
-                err.fileHandleForReading.readabilityHandler = { state.append($0.availableData, to: .stderr) }
-                process.terminationHandler = { _ in
-                    out.fileHandleForReading.readabilityHandler = nil
-                    err.fileHandleForReading.readabilityHandler = nil
-                    state.finish(stdout: out.fileHandleForReading.readDataToEndOfFile(), stderr: err.fileHandleForReading.readDataToEndOfFile(), status: process.terminationStatus)
-                }
-                do { try process.run() } catch { state.fail(GitEngineError.gitFailed) }
-                Task {
-                    do { try await Task.sleep(for: timeout); if !Task.isCancelled { state.timeout(); box.terminate() } }
-                    catch { }
+                // Foundation.Process applies filesystem normalization to argv on macOS.
+                // Git tree paths are opaque bytes, so launch their UTF-8 bytes directly.
+                let argv = [Self.executable, "-C", repository] + arguments
+                let envp = policyEnvironment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+                let stdoutPipe = Pipe(), stderrPipe = Pipe()
+                do {
+                    let pid = try spawn(arguments: argv, environment: envp, stdout: stdoutPipe.fileHandleForWriting.fileDescriptor, stderr: stderrPipe.fileHandleForWriting.fileDescriptor)
+                    box.set(pid)
+                    try? stdoutPipe.fileHandleForWriting.close()
+                    try? stderrPipe.fileHandleForWriting.close()
+                    let state = OutputState(limit: outputLimit, continuation: continuation, process: box)
+                    stdoutPipe.fileHandleForReading.readabilityHandler = { state.append($0.availableData, to: .stdout) }
+                    stderrPipe.fileHandleForReading.readabilityHandler = { state.append($0.availableData, to: .stderr) }
+                    Task.detached {
+                        var status: Int32 = 0
+                        let waited = waitpid(pid, &status, 0)
+                        box.clear(pid)
+                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                        stderrPipe.fileHandleForReading.readabilityHandler = nil
+                        state.finish(
+                            stdout: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+                            stderr: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                            status: waited == pid ? status : -1
+                        )
+                    }
+                    Task {
+                        do { try await Task.sleep(for: timeout); if !Task.isCancelled, state.timeout() { box.terminate() } }
+                        catch { }
+                    }
+                } catch {
+                    try? stdoutPipe.fileHandleForWriting.close()
+                    try? stderrPipe.fileHandleForWriting.close()
+                    continuation.resume(throwing: GitEngineError.gitFailed)
+                    return
                 }
             }
         }, onCancel: { box.terminate() })
+    }
+
+    private func spawn(arguments: [String], environment: [String], stdout: Int32, stderr: Int32) throws -> pid_t {
+        guard arguments.allSatisfy({ !$0.utf8.contains(0) }), environment.allSatisfy({ !$0.utf8.contains(0) }) else {
+            throw GitEngineError.gitFailed
+        }
+        let argumentPointers = arguments.map { strdup($0) }
+        let environmentPointers = environment.map { strdup($0) }
+        defer {
+            argumentPointers.forEach { free($0) }
+            environmentPointers.forEach { free($0) }
+        }
+        guard argumentPointers.allSatisfy({ $0 != nil }), environmentPointers.allSatisfy({ $0 != nil }) else {
+            throw GitEngineError.gitFailed
+        }
+        var argv = argumentPointers + [nil]
+        var envp = environmentPointers + [nil]
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { throw GitEngineError.gitFailed }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        guard posix_spawn_file_actions_adddup2(&actions, stdout, STDOUT_FILENO) == 0,
+              posix_spawn_file_actions_adddup2(&actions, stderr, STDERR_FILENO) == 0,
+              posix_spawn_file_actions_addclose(&actions, stdout) == 0,
+              posix_spawn_file_actions_addclose(&actions, stderr) == 0
+        else { throw GitEngineError.gitFailed }
+        var pid: pid_t = 0
+        let result = argv.withUnsafeMutableBufferPointer { argvBuffer in
+            envp.withUnsafeMutableBufferPointer { envpBuffer in
+                posix_spawn(&pid, Self.executable, &actions, nil, argvBuffer.baseAddress!, envpBuffer.baseAddress!)
+            }
+        }
+        guard result == 0 else { throw GitEngineError.gitFailed }
+        return pid
     }
 }
 
 private final class OutputState: @unchecked Sendable {
     enum Stream { case stdout, stderr }
-    let lock = NSLock(); let limit: Int; let continuation: CheckedContinuation<GitProcessResult, Error>; let process: Process
+    let lock = NSLock(); let limit: Int; let continuation: CheckedContinuation<GitProcessResult, Error>; let process: ProcessBox
     var stdout = Data(), stderr = Data(), completed = false, timedOut = false
-    init(limit: Int, continuation: CheckedContinuation<GitProcessResult, Error>, process: Process) { self.limit=limit; self.continuation=continuation; self.process=process }
+    init(limit: Int, continuation: CheckedContinuation<GitProcessResult, Error>, process: ProcessBox) { self.limit=limit; self.continuation=continuation; self.process=process }
     func append(_ data: Data, to stream: Stream) {
         guard !data.isEmpty else { return }; lock.lock(); defer { lock.unlock() }; guard !completed else { return }
         if stream == .stdout { stdout.append(data) } else { stderr.append(data) }
         if stdout.count + stderr.count > limit { completed=true; process.terminate(); continuation.resume(throwing: GitEngineError.outputLimit) }
     }
-    func timeout() { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; timedOut=true }
-    func fail(_ error: Error) { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed = true; continuation.resume(throwing: error) }
+    func timeout() -> Bool { lock.lock(); defer { lock.unlock() }; guard !completed else { return false }; timedOut=true; return true }
     func finish(stdout: Data, stderr: Data, status: Int32) {
         lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed=true
         self.stdout.append(stdout)
