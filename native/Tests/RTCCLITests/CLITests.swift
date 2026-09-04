@@ -11,6 +11,10 @@ import RTCCLI
         check((try? parser.parse(["status", "abc", "extra"])) == nil, "reject trailing arguments")
         check((try? parser.parse(["submit", "--repo", "/tmp/repo", "--base", "main", "--head", "HEAD", "--unknown"])) == nil, "reject unknown flags")
         check((try? parser.parse(Array(repeating: "x", count: 65))) == nil, "bound argument count")
+        check((try? parser.parse(["export", "abc", "--bogus", "--diagnostic", "--json"])) == nil, "unknown flag")
+        check((try? parser.parse(["export", "abc", "--diagnostic", "--diagnostic"])) == nil, "duplicate flag")
+        check((try? parser.parse(["install-skill", "--scope", "root", "--json"])) == nil, "invalid scope")
+        check((try? parser.parse(["status", "--hostile"])) == nil, "hostile positional")
     }
     static func check(_ condition: Bool, _ message: String) { precondition(condition, message) }
 }

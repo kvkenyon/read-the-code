@@ -26,15 +26,13 @@ extension DiffSliceReference {
     public init(
         path: String, hunkIndex: Int, side: AnchorSide = .new,
         startLine: Int, endLine: Int,
-        startContextHash: SHA256Digest? = nil, endContextHash: SHA256Digest? = nil
+        startContextHash: SHA256Digest, endContextHash: SHA256Digest
     ) {
-        var object: [String: Any] = [
+        let object: [String: Any] = [
             "path": path, "hunkIndex": hunkIndex, "side": side.rawValue,
             "startLine": startLine, "endLine": endLine,
-            "startContextHash": NSNull(), "endContextHash": NSNull(),
+            "startContextHash": jsonObject(startContextHash), "endContextHash": jsonObject(endContextHash),
         ]
-        if let startContextHash { object["startContextHash"] = jsonObject(startContextHash) }
-        if let endContextHash { object["endContextHash"] = jsonObject(endContextHash) }
         self = decoded(object, as: DiffSliceReference.self)
     }
 }
@@ -548,15 +546,29 @@ public struct FallbackTourProvider: TourProvider {
             chapters: chapters, risks: [])
     }
     private func chapterBlocksFor(_ file: DiffArtifact) -> [TourBlock] {
-        guard let hunk = file.hunks.first else { return [] }
+        guard !file.binary, !file.truncated, let hunk = file.hunks.first else { return [] }
         let side: AnchorSide = hunk.newLines > 0 ? .new : .old
-        let start = side == .new ? hunk.newStart : hunk.oldStart
-        let count = side == .new ? hunk.newLines : hunk.oldLines
+        var run: [DiffLine] = []
+        for line in hunk.lines {
+            let number = side == .new ? line.newLine : line.oldLine
+            guard let number else {
+                if !run.isEmpty { break }
+                continue
+            }
+            let previous = run.last.flatMap { side == .new ? $0.newLine : $0.oldLine }
+            if let previous, number != previous + 1 { break }
+            run.append(line)
+        }
+        guard let first = run.first, let last = run.last,
+            let start = side == .new ? first.newLine : first.oldLine,
+            let end = side == .new ? last.newLine : last.oldLine
+        else { return [] }
         return [
             .diffSlice(
                 DiffSliceReference(
                     path: file.path, hunkIndex: 0, side: side,
-                    startLine: max(1, start), endLine: max(1, start + max(1, count) - 1)))
+                    startLine: start, endLine: end,
+                    startContextHash: first.contextHash, endContextHash: last.contextHash))
         ]
     }
     private func deterministicID(revision: RevisionIdentity, digest: SHA256Digest) -> UUID {

@@ -37,6 +37,7 @@ targets:
       - target: RTCStore
       - target: RTCReview
       - target: RTCDesign
+      - target: RTCExport
       - target: RTCInboxFeature
       - target: RTCIngest
       - target: RTCLifecycle
@@ -185,9 +186,14 @@ targets:
   RTCExport:
     type: framework
     platform: macOS
-    sources: []
+    sources:
+      - Sources/RTCExport
     dependencies:
       - target: RTCContracts
+      - target: RTCDiagram
+      - target: RTCIPC
+      - target: RTCReview
+      - target: RTCTour
   RTCIngest:
     type: framework
     platform: macOS
@@ -371,6 +377,16 @@ targets:
     dependencies:
       - target: RTCContracts
       - target: RTCDomain
+  RTCExportTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/RTCExportTests
+    dependencies:
+      - target: RTCContracts
+      - target: RTCExport
+      - target: RTCIPC
+      - target: RTCReview
   RTCIPCTests:
     type: tool
     platform: macOS

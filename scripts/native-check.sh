@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 
 swift build --package-path native
 node scripts/validate-native-manifests.mjs
+swift scripts/validate-native-skill.swift
 if swift -e 'import XCTest' >/dev/null 2>&1; then
     swift test --package-path native
 else
@@ -16,6 +17,7 @@ for test_target in \
     RTCDiagramTests \
     RTCDiffCanvasTests \
     RTCDomainTests \
+    RTCExportTests \
     RTCIPCTests \
     RTCAgentChatSmokeTests \
     RTCInboxFeatureTests \

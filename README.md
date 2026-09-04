@@ -171,4 +171,4 @@ npm run release:check  # complete local release gate and npm pack dry run
 
 Set the repository `NPM_TOKEN` secret to a granular npm token allowed to publish this package with 2FA bypass. Push a version tag that exactly matches `package.json` (for example, `v0.1.1`): [the release workflow](.github/workflows/release.yml) runs `npm run release:check` and publishes the public package with provenance. Publishing distributes the local CLI and bundled assets; it does not add a hosted review service.
 
-See [architecture](docs/architecture.md), [typed protocol](docs/protocol.md), and [contributing](CONTRIBUTING.md) for implementation details. Read the Code is available under the [MIT License](LICENSE).
+See [architecture](docs/architecture.md), [typed protocol](docs/protocol.md), and [contributing](CONTRIBUTING.md) for the shipped Node/browser product. The in-progress native source has separate, evidence-scoped [architecture](docs/native-architecture.md), [protocol](docs/protocol-v2.md), [security](docs/native-security.md), and [performance](docs/native-performance.md) documentation. Read the Code is available under the [MIT License](LICENSE).
