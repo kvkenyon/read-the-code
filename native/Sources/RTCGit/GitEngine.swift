@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Dispatch
 import RTCContracts
 
 public enum GitEngineError: Error, Equatable, Sendable {
@@ -94,12 +95,14 @@ public struct SystemGitProcessRunner: GitBatchProcessRunning {
                     try? stderrPipe.fileHandleForWriting.close()
                     try? stdinPipe?.fileHandleForReading.close()
                     let state = OutputState(limit: outputLimit, continuation: continuation, process: box)
-                    // A pipe has one reader.  Mixing a readability callback with a final
+                    // A pipe has one reader. Mixing a readability callback with a final
                     // drain after waitpid races those reads and can lose Git output under
-                    // allocator pressure.  Each stream is read directly through EOF.
-                    Task.detached { drain(stdoutPipe, into: state, stream: .stdout) }
-                    Task.detached { drain(stderrPipe, into: state, stream: .stderr) }
-                    Task.detached {
+                    // allocator pressure. These blocking POSIX calls use an overcommitting
+                    // dispatch queue so four concurrent patches cannot exhaust Swift's
+                    // cooperative executor while their pipes wait for EOF.
+                    DispatchQueue.global(qos: .utility).async { drain(stdoutPipe, into: state, stream: .stdout) }
+                    DispatchQueue.global(qos: .utility).async { drain(stderrPipe, into: state, stream: .stderr) }
+                    DispatchQueue.global(qos: .utility).async {
                         var status: Int32 = 0
                         let waited = waitpid(pid, &status, 0)
                         box.clear(pid)
