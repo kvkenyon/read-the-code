@@ -40,8 +40,8 @@ public struct RTCSettingsView: View {
                     healthLabel
                 }
             }
-            if let error = viewModel.loadError ?? viewModel.validationError { Text(error).foregroundStyle(.red) }
-            HStack { Button("Reset") { Task { await viewModel.reset() } }; Spacer(); Button("Cancel") { viewModel.cancel() }; Button("Apply") { Task { await viewModel.apply() } }.disabled(!viewModel.hasChanges) }
+            if let error = viewModel.loadError ?? viewModel.validationError ?? viewModel.transitionOutcome { Text(error).foregroundStyle(.red) }
+            HStack { Button("Reset") { Task { await viewModel.reset() } }.disabled(viewModel.isTransitionInFlight); Spacer(); Button("Cancel") { viewModel.cancel() }.disabled(viewModel.isTransitionInFlight); Button("Apply") { Task { await viewModel.apply() } }.disabled(!viewModel.hasChanges || viewModel.isTransitionInFlight) }
         }.padding().frame(minWidth: 440)
     }
     @ViewBuilder private var healthLabel: some View {

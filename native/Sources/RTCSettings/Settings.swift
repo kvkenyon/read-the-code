@@ -124,10 +124,12 @@ public enum ModelHealthStatus: Equatable, Sendable { case idle, checking, health
 @MainActor
 public final class RTCSettingsViewModel: ObservableObject {
     @Published public private(set) var persisted: RTCSettings
-    @Published public var draft: RTCSettings
+    @Published public var draft: RTCSettings { didSet { if draft.selectedLocalModel != oldValue.selectedLocalModel { healthGeneration += 1; health = .idle } } }
     @Published public private(set) var validationError: String?
     @Published public private(set) var loadError: String?
     @Published public private(set) var health: ModelHealthStatus = .idle
+    @Published public private(set) var isTransitionInFlight = false
+    @Published public private(set) var transitionOutcome: String?
     private let persistence: any RTCSettingsPersistence
     private let lifecycle: any AppLifecycleService
     private let notificationService: (any NotificationPermissionRequester)?
@@ -143,13 +145,21 @@ public final class RTCSettingsViewModel: ObservableObject {
     public var hasChanges: Bool { draft != persisted }
     public func cancel() { healthGeneration += 1; draft = persisted; validationError = nil; health = .idle }
     public func reset() async {
+        guard beginTransition() else { return }
+        defer { isTransitionInFlight = false }
         healthGeneration += 1; health = .idle
         let actualLaunchAtLogin = await lifecycle.launchAtLoginEnabled()
         await transition(to: .default, persistenceAction: { try self.persistence.reset() }, lifecyclePrevious: actualLaunchAtLogin, success: { self.canPersist = true; self.loadError = nil })
     }
     public func apply() async {
+        guard beginTransition() else { return }
+        defer { isTransitionInFlight = false }
         guard canPersist else { validationError = "Settings could not be loaded. Reset settings before applying changes."; return }
         let target = draft; await transition(to: target, persistenceAction: { try self.persistence.save(target) })
+    }
+    private func beginTransition() -> Bool {
+        guard !isTransitionInFlight else { transitionOutcome = "A settings update is already in progress."; return false }
+        isTransitionInFlight = true; transitionOutcome = nil; return true
     }
     private func transition(to target: RTCSettings, persistenceAction: () throws -> Void, lifecyclePrevious: Bool? = nil, success: (() -> Void)? = nil) async {
         do { try target.validate() } catch { validationError = "The local model endpoint could not be used."; return }

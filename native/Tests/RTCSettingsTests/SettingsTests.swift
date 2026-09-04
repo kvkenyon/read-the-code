@@ -129,6 +129,31 @@ final class SettingsTests: XCTestCase {
         let error = await MainActor.run { rollback.validationError }
         XCTAssertEqual(error, "Settings and launch-at-login could not be reconciled.")
     }
+    func testApplyAndResetTransitionsCannotInterleave() async throws {
+        let applyLifecycle = SuspendingLifecycle(enabled: false, suspendEnable: true)
+        let applyPersistence = MemoryPersistence()
+        let applyVM = await MainActor.run { RTCSettingsViewModel(persistence: applyPersistence, lifecycle: applyLifecycle) }
+        await MainActor.run { applyVM.draft.launchAtLogin = true }
+        let apply = Task { await applyVM.apply() }; await applyLifecycle.waitForMutation()
+        await applyVM.reset()
+        await applyLifecycle.resumeMutation(); await apply
+        let applyEnabled = await applyLifecycle.enabled(); XCTAssertTrue(applyEnabled)
+        XCTAssertTrue(try applyPersistence.load().launchAtLogin)
+        let applyPersisted = await MainActor.run { applyVM.persisted.launchAtLogin }; let applyDraft = await MainActor.run { applyVM.draft.launchAtLogin }
+        XCTAssertTrue(applyPersisted); XCTAssertTrue(applyDraft)
+
+        let resetLifecycle = SuspendingLifecycle(enabled: true, suspendQuery: true)
+        let resetPersistence = MemoryPersistence(RTCSettings(launchAtLogin: true))
+        let resetVM = await MainActor.run { RTCSettingsViewModel(persistence: resetPersistence, lifecycle: resetLifecycle) }
+        let reset = Task { await resetVM.reset() }; await resetLifecycle.waitForQuery()
+        await MainActor.run { resetVM.draft.notifications = .on }; await resetVM.apply()
+        await resetLifecycle.resumeQuery(); await reset
+        let resetEnabled = await resetLifecycle.enabled(); XCTAssertFalse(resetEnabled)
+        XCTAssertFalse(try resetPersistence.load().launchAtLogin)
+        let resetPersisted = await MainActor.run { resetVM.persisted.launchAtLogin }; let resetDraft = await MainActor.run { resetVM.draft.launchAtLogin }
+        XCTAssertFalse(resetPersisted); XCTAssertFalse(resetDraft)
+        let busy = await MainActor.run { resetVM.transitionOutcome }; XCTAssertEqual(busy, "A settings update is already in progress.")
+    }
     func testDelayedHealthCannotOverwriteNewerCancelResetOrModelEdit() async {
         let transport = DelayedTransport(); let model = RTCSettings.LocalModel(kind: .ollama, endpoint: "http://127.0.0.1:11434", model: "old")
         let persistence = MemoryPersistence(); let vm = await MainActor.run { RTCSettingsViewModel(persistence: persistence, lifecycle: RecordingLifecycle(), transport: transport) }
@@ -149,12 +174,19 @@ final class SettingsTests: XCTestCase {
         let reset = Task { await vm.checkHealth() }; await transport.waitForRequests(4)
         await vm.reset(); transport.finish(3, models: ["stale"]); await reset
         let resetHealth = await MainActor.run { vm.health }; XCTAssertEqual(resetHealth, .idle)
+
+        await MainActor.run { vm.draft.selectedLocalModel = model }
+        let edited = Task { await vm.checkHealth() }; await transport.waitForRequests(5)
+        await MainActor.run { vm.draft.selectedLocalModel?.model = "edited-without-new-check" }
+        transport.finish(4, models: ["stale"]); await edited
+        let editedHealth = await MainActor.run { vm.health }; XCTAssertEqual(editedHealth, .idle)
     }
     private func temporaryDirectory() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
 }
 
 private final class MemoryPersistence: RTCSettingsPersistence, @unchecked Sendable {
-    private var value = RTCSettings.default
+    private var value: RTCSettings
+    init(_ value: RTCSettings = .default) { self.value = value }
     func load() throws -> RTCSettings { value }; func save(_ settings: RTCSettings) throws { value = settings }; func reset() throws { value = .default }
 }
 private final class FailingPersistence: RTCSettingsPersistence, @unchecked Sendable {
@@ -180,6 +212,19 @@ private actor RecordingPermissionRequester: NotificationPermissionRequester {
     private var requests = 0
     func requestPermissionIfNeeded() async throws -> NotificationAuthorization { requests += 1; return .authorized }
     func count() -> Int { requests }
+}
+private actor SuspendingLifecycle: AppLifecycleService {
+    private var state: Bool; private let suspendEnable: Bool; private let suspendQuery: Bool
+    private var mutationWaiter: CheckedContinuation<Void, Never>?; private var queryWaiter: CheckedContinuation<Void, Never>?
+    init(enabled: Bool, suspendEnable: Bool = false, suspendQuery: Bool = false) { self.state = enabled; self.suspendEnable = suspendEnable; self.suspendQuery = suspendQuery }
+    func activate(reviewID: ReviewID?) async {}
+    func launchAtLogin(enabled: Bool) async throws { if enabled && suspendEnable { await withCheckedContinuation { mutationWaiter = $0 } }; state = enabled }
+    func launchAtLoginEnabled() async -> Bool { if suspendQuery { await withCheckedContinuation { queryWaiter = $0 } }; return state }
+    func waitForMutation() async { while mutationWaiter == nil { await Task.yield() } }
+    func resumeMutation() { mutationWaiter?.resume(); mutationWaiter = nil }
+    func waitForQuery() async { while queryWaiter == nil { await Task.yield() } }
+    func resumeQuery() { queryWaiter?.resume(); queryWaiter = nil }
+    func enabled() -> Bool { state }
 }
 private final class DelayedTransport: ModelHTTPTransport, @unchecked Sendable {
     private let lock = NSLock(); private var continuations = [AsyncThrowingStream<Data, Error>.Continuation]()
