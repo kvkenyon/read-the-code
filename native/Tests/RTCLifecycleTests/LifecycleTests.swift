@@ -14,6 +14,7 @@ final class RecordingPresenter: NotificationPresenter, @unchecked Sendable {
 @main struct LifecycleTests {
     static func check(_ value: @autoclosure () -> Bool, _ message: String) { precondition(value(), message) }
     static func main() async throws {
+        notificationRuntimeRequiresAnApplicationBundle()
         let review = try ReviewID("0123456789abcdef01234567")
         let presenter = RecordingPresenter()
         let deliveries = InMemoryNotificationDeliveryStore()
@@ -48,6 +49,16 @@ final class RecordingPresenter: NotificationPresenter, @unchecked Sendable {
         let optedOut = await lifecycle.launchAtLoginState()
         check(!optedOut.enabled, "login opt-out")
         print("RTC lifecycle checks passed")
+    }
+
+    static func notificationRuntimeRequiresAnApplicationBundle() {
+        precondition(!NotificationRuntimeSupport.canUseSystemCenter(
+            bundleURL: URL(fileURLWithPath: "/tmp/ReadTheCode"), bundleIdentifier: nil))
+        precondition(!NotificationRuntimeSupport.canUseSystemCenter(
+            bundleURL: URL(fileURLWithPath: "/tmp/ReadTheCode"), bundleIdentifier: "com.readthecode.app"))
+        precondition(NotificationRuntimeSupport.canUseSystemCenter(
+            bundleURL: URL(fileURLWithPath: "/Applications/ReadTheCode.app"),
+            bundleIdentifier: "com.readthecode.app"))
     }
 
     final class ReceivedEvents: @unchecked Sendable {

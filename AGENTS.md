@@ -10,6 +10,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Version tags matching `package.json` publish through `.github/workflows/release.yml` only after `npm run release:check`; keep the packed-install smoke in that gate.
 - Native packaging preparation is intentionally unsigned and non-publishing: run `npm run test:native-packaging` for CLT-safe validation, and treat `scripts/native-release/require-full-xcode.sh` plus final archive/sign/notarize/clean-install work as later release-host gates.
 - `scripts/native-check.sh` builds the landed SwiftPM graph, validates both native manifests, runs every executable smoke, and generates the Xcode project; under Command Line Tools it reports XCTest and Xcode-only gates as explicitly remaining.
+- `swift run --package-path native ReadTheCode` is the CLT-safe local demo launch; raw SwiftPM processes intentionally disable system notifications, and native IPC uses the UID-scoped short socket documented in `docs/native-architecture.md`.
 - `native/Sources/RTCSettings` owns private, versioned app settings and must retain the loopback-only adapter validation and credential-lookup boundary.
 - Native exports are constructed through the `RTCExport` allowlist and diagnostic preview/confirmation boundary; keep its caps, redaction rules, skill-v2 contract, and evidence-scoped public docs aligned through `RTCExportTests` and `scripts/validate-native-skill.swift`.
 

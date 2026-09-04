@@ -122,6 +122,51 @@ extension TourArtifactResolving {
     }
 }
 
+/// Resolves tour blocks exclusively from the immutable manifest already stored
+/// for a review. Rendering therefore remains available when the repository is
+/// missing or its symbolic refs have moved, and never consults the working tree.
+public struct ManifestTourArtifactResolver: TourArtifactResolving, Sendable {
+    public let manifest: ReviewManifest
+    private let syntax: any SyntaxHighlighter
+
+    public init(manifest: ReviewManifest, syntax: any SyntaxHighlighter = RTCSyntaxHighlighter()) {
+        self.manifest = manifest
+        self.syntax = syntax
+    }
+
+    public func manifest(for revision: RevisionIdentity) async throws -> ReviewManifest {
+        guard manifest.revision == revision, manifest.id == revision.reviewID else {
+            throw TourIntegrationError.revisionMismatch
+        }
+        return manifest
+    }
+
+    public func resolve(
+        _ reference: DiffSliceReference, revision: RevisionIdentity
+    ) async throws -> ResolvedDiffSlice {
+        _ = try await manifest(for: revision)
+        let source = ManifestTourArtifactSource(manifest: manifest)
+        let anchor = try ReviewAnchor(
+            revision: revision, path: reference.path, scope: .hunk,
+            side: reference.side, startLine: reference.startLine, endLine: reference.endLine,
+            startContextHash: reference.startContextHash,
+            endContextHash: reference.endContextHash, hunkIndex: reference.hunkIndex)
+        guard try await source.validate(anchor), let lines = source.exactLines(for: reference) else {
+            throw TourIntegrationError.invalidPayload
+        }
+        let sourceText = lines.map(\.text).joined(separator: "\n")
+        let digest = SHA256Digest(data: Data(sourceText.utf8))
+        let spans = (try? await syntax.highlight(
+            path: reference.path, fileDigest: digest, source: sourceText,
+            language: nil, lines: nil)) ?? []
+        return ResolvedDiffSlice(reference: reference, lines: lines, syntaxSpans: spans)
+    }
+
+    public func layout(_ diagram: DiagramDocument) throws -> DiagramLayout {
+        try DiagramLayoutEngine.layout(DiagramValidator.validate(diagram))
+    }
+}
+
 public struct ExactTourArtifactResolver: TourArtifactResolving, ExactArtifactSource, Sendable {
     private let git: any ExactGitService
     private let syntax: any SyntaxHighlighter

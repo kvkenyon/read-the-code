@@ -157,6 +157,18 @@ File review checkmarks are browser-local convenience state. Submitted comments, 
 
 ## Development
 
+### Native macOS demo
+
+Command Line Tools can build and launch the current unsigned local app directly:
+
+```bash
+swift run --package-path native ReadTheCode
+```
+
+Choose **Open Repository…** to review that repository's latest committed change (`HEAD^` → `HEAD`). The app materializes the exact committed diff, persists review state outside the repository, and opens the Diff/Tour workspace with comments and the revision-scoped worker rail. The raw SwiftPM launch intentionally disables system notifications because it has no macOS application-bundle identity; notifications remain enabled for a generated `.app` build.
+
+For the Xcode app target, run `./scripts/native-bootstrap.sh`, open `native/ReadTheCode.xcodeproj`, select the `ReadTheCode` scheme and **My Mac**, then click **Run**. Full-Xcode UI tests, signing, notarization, and final release qualification remain unrun.
+
 ```bash
 npm install
 npm run fixture        # creates .test-state/example-repository

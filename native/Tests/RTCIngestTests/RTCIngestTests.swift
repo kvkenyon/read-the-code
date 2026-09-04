@@ -10,6 +10,15 @@ import RTCStore
 @main
 struct RTCIngestTests {
     static func main() async throws {
+        let longWorktreeRoot = URL(fileURLWithPath:
+            "/Users/example/.treehouse/read-the-code-demo-ef699f/1234567890/read-the-code-demo/"
+                + String(repeating: "nested-worktree/", count: 8))
+        let longPaths = RTCInstallationPaths(root: longWorktreeRoot)
+        check(longPaths.socket.path.utf8.count + 1 <= 104, "IPC endpoint must fit Darwin sockaddr_un")
+        check(longPaths.socket.path.hasPrefix("/tmp/rtc-"), "long-root IPC endpoint must remain out of repository")
+        check(longPaths.store.path.hasPrefix(longWorktreeRoot.path), "durable store moved out of private state root")
+        check(longPaths.capability.path.hasPrefix(longWorktreeRoot.path), "capability moved out of private state root")
+
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".test-state/i-\(UUID().uuidString.prefix(8))", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

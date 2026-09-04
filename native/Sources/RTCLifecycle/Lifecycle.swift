@@ -28,6 +28,20 @@ public enum NotificationAuthorization: String, Codable, Sendable {
     case notDetermined, denied, provisional, authorized
 }
 
+/// `UNUserNotificationCenter.current()` aborts when called by a raw SwiftPM
+/// executable because that process has no application-bundle proxy. Keep the
+/// CLT launch path notification-free while retaining the system center for the
+/// generated `.app` target.
+public enum NotificationRuntimeSupport {
+    public static func canUseSystemCenter(
+        bundleURL: URL = Bundle.main.bundleURL,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> Bool {
+        bundleURL.pathExtension.lowercased() == "app"
+            && !(bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+}
+
 public struct LaunchAtLoginState: Equatable, Sendable {
     public let enabled: Bool
     public let registrationError: String?

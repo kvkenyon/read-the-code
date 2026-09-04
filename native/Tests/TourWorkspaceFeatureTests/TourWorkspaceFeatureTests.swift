@@ -63,7 +63,8 @@ struct TourWorkspaceFeatureTests {
     }
 
     private static func diffSlicesResolveThroughExactArtifacts(_ fixture: Fixture) async throws {
-        let source = ManifestTourArtifactSource(manifest: fixture.manifest())
+        let manifest = fixture.manifest()
+        let source = ManifestTourArtifactSource(manifest: manifest)
         let hash = fixture.file.hunks[0].lines[0].contextHash
         let valid = DiffSliceReference(
             path: fixture.file.path, hunkIndex: 0, startLine: 10, endLine: 10,
@@ -87,6 +88,11 @@ struct TourWorkspaceFeatureTests {
             expectedInputDigest: fixture.contextDigest,
             anchors: source)
         try expectFailure(rejected, code: .unresolvedAnchor)
+        let storedResolver = ManifestTourArtifactResolver(manifest: manifest)
+        let resolved = try await storedResolver.resolve(valid, revision: fixture.revision)
+        try expect(
+            resolved.lines.map(\.text) == [fixture.file.hunks[0].lines[0].text],
+            "stored tour rendering did not use the immutable manifest")
     }
 
     private static func sideSpecificDiffSlicesAreExact(_ fixture: Fixture) async throws {

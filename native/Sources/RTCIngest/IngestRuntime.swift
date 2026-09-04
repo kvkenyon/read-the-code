@@ -19,11 +19,16 @@ public struct RTCInstallationPaths: Sendable {
     public let capability: URL
 
     public init(root: URL) {
-        self.root = root
-        store = root.appendingPathComponent("State", isDirectory: true)
-        spool = root.appendingPathComponent("Spool", isDirectory: true)
-        socket = root.appendingPathComponent("reviewd.sock")
-        capability = root.appendingPathComponent("install-capability")
+        let canonicalRoot = root.standardizedFileURL
+        self.root = canonicalRoot
+        store = canonicalRoot.appendingPathComponent("State", isDirectory: true)
+        spool = canonicalRoot.appendingPathComponent("Spool", isDirectory: true)
+        // Darwin's sockaddr_un path is only 104 bytes. A deterministic endpoint
+        // under the sticky system temp directory keeps legitimate long worktree
+        // test roots usable; peer-UID and capability checks remain authoritative.
+        let digest = SHA256Digest(data: Data(canonicalRoot.path.utf8)).hex.prefix(24)
+        socket = URL(fileURLWithPath: "/tmp/rtc-\(geteuid())-\(digest).sock")
+        capability = canonicalRoot.appendingPathComponent("install-capability")
     }
 
     public static func applicationSupport() throws -> RTCInstallationPaths {
@@ -101,6 +106,9 @@ public final class RTCIngestRuntime: @unchecked Sendable {
     private static let allowedOperations: Set<String> = ["submitReview", "status", "pollReviewEvents", "closeReview", "retryReview"]
     public let records: SQLiteIngestRepository
     public let reviewRepository: SQLiteReviewRepository
+    /// Shared private store used by the app composition root to open the review,
+    /// tour, and conversation projections for one exact revision.
+    public let store: SQLiteStore
     public let coordinator: SubmissionCoordinator
     public let handler: SubmissionOperationHandler
     public let notificationService: DeduplicatingNotificationService
@@ -128,6 +136,7 @@ public final class RTCIngestRuntime: @unchecked Sendable {
         let handler = SubmissionOperationHandler(coordinator: coordinator)
         self.records = records
         self.reviewRepository = reviewRepository
+        self.store = store
         self.coordinator = coordinator
         self.handler = handler
         notificationService = notifications
