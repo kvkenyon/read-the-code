@@ -24,6 +24,8 @@ struct TourWorkspaceFeatureTests {
         try await modelStreamingIsBoundedByWorkAndDeadline(fixture)
         try await reviewStateIsAuthoritative(fixture)
         try await materialSignalsRequireGroundedDiagrams(fixture)
+        try await firstOpenPublishesFallbackBeforeRenderingCompletes(fixture)
+        try await unavailableMaterialDiagramIsExplicit(fixture)
         try await cancellationIsExplicitAndDurable(fixture)
         try await deterministicFallbackIsStable(fixture)
         try await noChangesIsTruthful(fixture)
@@ -603,6 +605,85 @@ struct TourWorkspaceFeatureTests {
             "material diagram intent was not recorded")
     }
 
+    private static func firstOpenPublishesFallbackBeforeRenderingCompletes(_ fixture: Fixture) async throws {
+        let manifest = materialManifest(fixture)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rtc-tour-first-open-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SQLiteStore(rootURL: root)
+        let gate = RenderGate()
+        let artifacts = GatedManifestResolver(manifest: manifest, gate: gate)
+        let jobs = TourGenerationJobHandler(
+            persistence: SQLiteTourPersistence(store: store), jobs: JobQueue(store: store), artifacts: artifacts)
+        let model = await MainActor.run {
+            TourWorkspaceModel(
+                reviewID: fixture.revision.reviewID, revision: fixture.revision,
+                jobs: jobs, artifacts: artifacts, navigate: { _ in })
+        }
+
+        let started = ContinuousClock.now
+        let load = Task { await model.load() }
+        await gate.waitUntilEntered()
+
+        // This proves persistence completed while the optional rendering resolver is
+        // blocked; the screen must already have left Loading without tab re-entry.
+        let persisted = try await jobs.history(reviewID: fixture.revision.reviewID, revision: fixture.revision)
+        try expect(persisted.selectedTour?.producer == .deterministicFallback, "fallback was not persisted")
+        let visible = await MainActor.run { () -> Bool in
+            if case .fallback = model.status { return model.document != nil }
+            return false
+        }
+        try expect(visible, "first open remained loading after a persisted fallback")
+        try expect(
+            started.duration(to: .now) < .seconds(1),
+            "persisted fallback was not published to the first-open model promptly")
+        await gate.release()
+        await load.value
+        let revisitStarted = ContinuousClock.now
+        await model.load()
+        try expect(
+            revisitStarted.duration(to: .now) < .seconds(1),
+            "persisted fallback did not retain the fast tab-reentry path")
+    }
+
+    private static func unavailableMaterialDiagramIsExplicit(_ fixture: Fixture) async throws {
+        let manifest = materialManifest(fixture)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "rtc-tour-no-diagram-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SQLiteStore(rootURL: root)
+        let artifacts = ManifestTourArtifactResolver(manifest: manifest)
+        let jobs = TourGenerationJobHandler(
+            persistence: SQLiteTourPersistence(store: store), jobs: JobQueue(store: store), artifacts: artifacts)
+        let model = await MainActor.run {
+            TourWorkspaceModel(
+                reviewID: fixture.revision.reviewID, revision: fixture.revision,
+                jobs: jobs, artifacts: artifacts, navigate: { _ in })
+        }
+        await model.load()
+        let unavailable = await MainActor.run { model.unavailableDiagramKinds.map(\.rawValue) }
+        try expect(
+            unavailable == [DiagramKind.controlFlow.rawValue],
+            "missing material diagram was not exposed as unavailable")
+    }
+
+    private static func materialManifest(_ fixture: Fixture) -> ReviewManifest {
+        let lines = (10..<14).map { number -> DiffLine in
+            let text = "if branch\(number) { return }"
+            return DiffLine(
+                kind: .addition, oldLine: nil, newLine: number, text: text,
+                contextHash: SHA256Digest(data: Data(text.utf8)))
+        }
+        let hunk = DiffHunk(
+            header: "@@ -9,0 +10,4 @@", oldStart: 9, oldLines: 0,
+            newStart: 10, newLines: 4, lines: lines)
+        let file = DiffArtifact(
+            path: fixture.file.path, status: .modified, additions: 4,
+            deletions: 0, binary: false, truncated: false,
+            oldLineCount: 9, newLineCount: 13, hunks: [hunk])
+        return fixture.manifest(files: [file])
+    }
+
     private static func deterministicFallbackIsStable(_ fixture: Fixture) async throws {
         let source = ManifestTourArtifactSource(manifest: fixture.manifest())
         let request = TourGenerationRequest(revision: fixture.revision, contextDigest: fixture.contextDigest)
@@ -763,6 +844,50 @@ private struct FakeGit: ExactGitService {
     func context(_ request: GitContextRequest) async throws -> GitContext { throw TestFailure("unused") }
     func verifyCurrentHead(_ revision: RevisionIdentity) async throws -> Bool { revision == manifest.revision }
     func cancel(_ cancellation: GitCancellation) async {}
+}
+
+private actor RenderGate {
+    private var entered = false
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func block() async {
+        entered = true
+        guard !released else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        while !entered { await Task.yield() }
+    }
+
+    func release() {
+        released = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private struct GatedManifestResolver: TourArtifactResolving, Sendable {
+    let manifest: ReviewManifest
+    let gate: RenderGate
+    private var base: ManifestTourArtifactResolver { ManifestTourArtifactResolver(manifest: manifest) }
+
+    func manifest(for revision: RevisionIdentity) async throws -> ReviewManifest {
+        try await base.manifest(for: revision)
+    }
+
+    func resolve(
+        _ reference: DiffSliceReference, revision: RevisionIdentity
+    ) async throws -> ResolvedDiffSlice {
+        await gate.block()
+        return try await base.resolve(reference, revision: revision)
+    }
+
+    func layout(_ diagram: DiagramDocument) throws -> DiagramLayout {
+        try base.layout(diagram)
+    }
 }
 
 private struct SecretCredentials: ModelCredentialLookup {
