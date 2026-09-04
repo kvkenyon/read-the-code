@@ -206,7 +206,14 @@ private final class OutputState: @unchecked Sendable {
         if stream == .stdout { stdout.append(data) } else { stderr.append(data) }
         if stdout.count + stderr.count > limit { completed=true; process.terminate(); continuation.resume(throwing: GitEngineError.outputLimit) }
     }
-    func timeout() -> Bool { lock.lock(); defer { lock.unlock() }; guard !completed else { return false }; timedOut=true; return true }
+    func timeout() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !completed else { return false }
+        timedOut = true; completed = true
+        process.terminate()
+        continuation.resume(throwing: GitEngineError.timedOut)
+        return true
+    }
     func processExited(status: Int32) {
         lock.lock(); defer { lock.unlock() }
         processStatus = status
