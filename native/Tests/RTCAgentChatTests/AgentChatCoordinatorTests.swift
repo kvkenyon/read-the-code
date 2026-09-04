@@ -4,6 +4,15 @@ import RTCContracts
 import RTCAgentChat
 
 final class AgentChatCoordinatorTests: XCTestCase {
+    func testEmptyConversationReplayLeavesChatRailUsable() async throws {
+        let reviewID = try ReviewID("0123456789abcdef01234567")
+        let coordinator = AgentChatCoordinator(reviewID: reviewID, conversationID: UUID(), repository: MemoryRepository(), wakeSink: NoopWake())
+        let snapshot = try await coordinator.replay()
+        XCTAssertTrue(snapshot.events.isEmpty)
+        XCTAssertEqual(snapshot.cursor, 0)
+        XCTAssertFalse(snapshot.ended)
+    }
+
     func testReplayRejectsGapsAndWrongStream() async throws {
         let reviewID = try ReviewID("0123456789abcdef01234567")
         let conversationID = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!

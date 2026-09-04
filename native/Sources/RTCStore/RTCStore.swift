@@ -213,6 +213,13 @@ public final class SQLiteConversationEventRepository: ConversationReplayReposito
     public func page(reviewID: ReviewID, conversationID: UUID, after: Int, maximumEvents: Int, maximumBytes: Int) async throws -> ConversationPage {
         guard after >= 0, maximumEvents > 0, maximumBytes > 0 else { throw RTCStoreError.corrupt("invalid conversation page") }
         return try await store.read { db in
+            // A newly opened conversation has no durable binding until its first write.
+            // Cursor zero is the only valid replay request for that virgin stream; keep
+            // all established-stream scope and cursor validation unchanged below.
+            guard try String.fetchOne(db, sql: "SELECT review_id FROM conversations WHERE id = ?", arguments: [conversationID.uuidString]) != nil else {
+                guard after == 0 else { throw RTCStoreError.corrupt("conversation scope") }
+                return ConversationPage(after: 0, nextCursor: 0, events: [], hasMore: false)
+            }
             try self.requireBinding(db, reviewID: reviewID, conversationID: conversationID)
             let last = (try Int.fetchOne(db, sql: "SELECT COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?", arguments: [conversationID.uuidString])) ?? 0
             guard after <= last else { throw RTCStoreError.corrupt("conversation cursor ahead") }
