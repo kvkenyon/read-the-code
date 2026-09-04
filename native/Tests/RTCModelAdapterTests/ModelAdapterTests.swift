@@ -6,9 +6,22 @@ final class ModelAdapterTests: XCTestCase {
     func testOnlyLoopbackIPLiteralEndpointsAreAccepted() throws {
         XCTAssertNoThrow(try LoopbackEndpoint(URL(string: "http://127.0.0.1:11434")!))
         XCTAssertNoThrow(try LoopbackEndpoint(URL(string: "http://[::1]:8080")!))
+        XCTAssertNoThrow(try LoopbackEndpoint(URL(string: "http://[0:0:0:0:0:0:0:1]:8080")!))
         XCTAssertThrowsError(try LoopbackEndpoint(URL(string: "http://localhost:11434")!))
         XCTAssertThrowsError(try LoopbackEndpoint(URL(string: "http://192.168.1.2:11434")!))
         XCTAssertThrowsError(try LoopbackEndpoint(URL(string: "http://127.0.0.1:11434?leak=token")!))
+        for host in ["127.256.0.1", "127.999.999.999", "127.-1.-1.-1", "localhost"] {
+            XCTAssertThrowsError(try LoopbackEndpoint(URL(string: "http://\(host):11434")!))
+        }
+    }
+
+    func testTransportRevalidatesCompleteDestination() async {
+        let transport = URLSessionModelTransport()
+        for url in ["http://127.256.0.1:11434", "http://token@127.0.0.1:11434", "http://127.0.0.1:11434?token=secret"] {
+            do { _ = try await transport.send(URLRequest(url: URL(string: url)!), limits: .init()); XCTFail("accepted \(url)") }
+            catch let error as ModelAdapterError { XCTAssertEqual(error, .invalidEndpoint("destination changed")) }
+            catch { XCTFail("unexpected error \(error)") }
+        }
     }
 
     func testOllamaFragmentedStreamIsReassembledAndBounded() async throws {

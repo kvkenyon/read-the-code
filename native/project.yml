@@ -38,6 +38,7 @@ targets:
       - target: RTCReview
       - target: RTCDesign
       - target: RTCLifecycle
+      - target: RTCSettings
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.readthecode.app
       GENERATE_INFOPLIST_FILE: NO
@@ -168,6 +169,15 @@ targets:
       - Sources/RTCLifecycle
     dependencies:
       - target: RTCContracts
+  RTCSettings:
+    type: framework
+    platform: macOS
+    sources:
+      - Sources/RTCSettings
+    dependencies:
+      - target: RTCContracts
+      - target: RTCModelAdapters
+      - target: RTCLifecycle
   RTCExport:
     type: framework
     platform: macOS
@@ -263,6 +273,13 @@ targets:
       - Tests/RTCWorkspaceShellTests
     dependencies:
       - target: RTCWorkspaceShell
+  RTCSettingsTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/RTCSettingsTests
+    dependencies:
+      - target: RTCSettings
   RTCCLITests:
     type: tool
     platform: macOS
