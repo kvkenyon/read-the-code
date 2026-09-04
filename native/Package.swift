@@ -23,6 +23,7 @@ let libraryTargets = [
     "RTCInboxFeature",
     "RTCWorkspaceShell",
     "RTCReviewWorkspace",
+    "RTCExport",
     "RTCCLI",
     "GitWorker",
     "ModelWorker",
@@ -100,6 +101,10 @@ let package = Package(
         .target(name: "RTCWorkspaceShell", dependencies: ["RTCDesign", "RTCContracts", "RTCAgentChat"]),
         .target(name: "RTCReviewWorkspace", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCSyntax", "RTCDiffCanvas", "RTCDesign", "RTCWorkspaceShell"]),
         .target(
+            name: "RTCExport",
+            dependencies: ["RTCContracts", "RTCDiagram", "RTCIPC", "RTCReview", "RTCTour"]
+        ),
+        .target(
             name: "RTCCLI",
             dependencies: ["RTCContracts", "RTCGit", "RTCIngest", "RTCIPC"],
             path: "CLI/rtc",
@@ -130,6 +135,7 @@ let package = Package(
                 "RTCIPC",
                 "RTCReview",
                 "RTCDesign",
+                "RTCExport",
                 "RTCInboxFeature",
                 "RTCIngest",
                 "RTCLifecycle",
@@ -165,6 +171,11 @@ let package = Package(
         .executableTarget(name: "RTCDiagramTests", dependencies: ["RTCContracts", "RTCDiagram"], path: "Tests/RTCDiagramTests"),
         .executableTarget(name: "RTCDiffCanvasTests", dependencies: ["RTCContracts", "RTCDiffCanvas"], path: "Tests/RTCDiffCanvasTests"),
         .executableTarget(name: "RTCDomainTests", dependencies: ["RTCContracts", "RTCDomain"], path: "Tests/RTCDomainTests"),
+        .executableTarget(
+            name: "RTCExportTests",
+            dependencies: ["RTCContracts", "RTCExport", "RTCIPC", "RTCReview"],
+            path: "Tests/RTCExportTests"
+        ),
         .executableTarget(name: "RTCIPCTests", dependencies: ["RTCContracts", "RTCIPC"], path: "Tests/RTCIPCTests"),
         .executableTarget(name: "RTCAgentChatSmokeTests", dependencies: ["RTCContracts", "RTCStore", "RTCIPC", "RTCAgentChat"], path: "Tests/RTCAgentChatSmokeTests"),
         .executableTarget(name: "RTCLifecycleTests", dependencies: ["RTCContracts", "RTCLifecycle"], path: "Tests/RTCLifecycleTests"),

@@ -1,5 +1,7 @@
 # Typed local protocol, schema version 1
 
+This is the shipped Node/browser contract. The separately compiled native schema-v2 source contract and its current composition limits are documented in [`protocol-v2.md`](protocol-v2.md).
+
 The browser and CLI expose the same records. JSON field names and event meanings described here are stable for schema version 1; additive fields may appear. Consumers must reject unsupported `schemaVersion` values rather than guessing.
 
 The normal CLI surface is compact TOON intended for agent-readable summaries. It deliberately bounds long comments, paths, file lists, and archival output; use `--full` to expand that TOON view. This document is the separate stable automation contract: Sophon and other consumers that need exact identities, cursors, complete event bodies, or the local `open` capability must request `--json`. JSON semantics, event ordering, error categories, and `schemaVersion: 1` remain unchanged.
@@ -119,29 +121,3 @@ Errors have this shape:
 ```
 
 Source TypeScript definitions are authoritative in [`src/protocol.ts`](../src/protocol.ts).
-
-## Native agent conversation IPC
-
-The native app's private same-UID IPC conversation capability is separate from
-the loopback review protocol. It is scoped only to polling, replies, availability,
-and acknowledgement; it cannot approve, request changes, close a review, or
-mutate review evidence. The length-prefixed transport frame is capped at 4 MiB,
-and this chat surface caps decoded operation payloads at 128 KB. Reply UUIDs
-are durably journaled with an operation/payload digest; exact retries reuse the
-stored result and conflicting reuse is rejected. Conversation pages replay from
-private durable state after either endpoint restarts. Errors and status are
-generic and never expose capabilities, paths, credentials, or prompt content.
-Promotion creates only a proposed payload; the existing anchored review mutation
-path must validate and explicitly apply any review effect.
-
-## Native schema-version 2 review log
-
-The native review workspace uses the contracts in `native/Sources/RTCContracts/Contracts.swift`. Its immutable `ReviewManifest` fixes the repository path and exact base/head commit pair. Workspace state is reconstructed by replaying `review_events` in contiguous per-review sequence order; a gap, duplicate event ID, wrong review/revision, malformed payload, invalid anchor, or illegal transition fails closed.
-
-The native event kinds are `threadCreated`, `threadMessageAdded`, `fileProgressChanged`, `feedback`, `changesRequested`, `approval`, `close`, `threadResolved`, and `threadReopened`. The first three persist local workspace state. One user command appends one event: notably, `changesRequested` contains both the sorted draft IDs and actual bounded summary in one atomic event rather than emitting a preceding feedback event.
-
-Callers submit a `PendingReviewEvent` with a stable operation UUID and the expected current sequence. `EventRepository.append(_:after:)` compares an existing UUID byte-for-byte for idempotent response-loss recovery, checks the exact non-stale review and expected tail, assigns the canonical next sequence inside the store transaction, and returns the stored `ReviewEvent`. The command handler retains the exact pending event, including its canonical payload and nested timestamps, across an ambiguous append error. A definite optimistic-tail conflict discards that candidate, replays the winning tail, and revalidates before preparing a replacement under the same operation UUID.
-
-Every review-event payload uses the exact envelope `{ "data": <canonical JSON string>, "version": "1" }`. Hydration rejects noncanonical or duplicate-key JSON, missing or additional fields, wrong scalar types, excessive paths/comments/arrays, unsorted or duplicate identifier lists, and event-specific semantic violations before applying an event. In particular, `close` accepts only the canonical empty object as its data.
-
-`threadCreated` fixes a context-hashed exact-revision anchor for the lifetime of the thread. Later events identify the thread but cannot replace its anchor. A moved symbolic head, unavailable mutation preflight, persisted stale manifest, or terminal review leaves prior evidence readable while all mutations fail closed. Local draft and file-progress events are excluded from worker-facing delivery until an explicit formal review action.

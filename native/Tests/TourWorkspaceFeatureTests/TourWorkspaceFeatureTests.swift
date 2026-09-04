@@ -64,8 +64,13 @@ struct TourWorkspaceFeatureTests {
 
     private static func diffSlicesResolveThroughExactArtifacts(_ fixture: Fixture) async throws {
         let source = ManifestTourArtifactSource(manifest: fixture.manifest())
-        let valid = DiffSliceReference(path: fixture.file.path, hunkIndex: 0, startLine: 10, endLine: 10)
-        let invalid = DiffSliceReference(path: fixture.file.path, hunkIndex: 9, startLine: 10, endLine: 10)
+        let hash = fixture.file.hunks[0].lines[0].contextHash
+        let valid = DiffSliceReference(
+            path: fixture.file.path, hunkIndex: 0, startLine: 10, endLine: 10,
+            startContextHash: hash, endContextHash: hash)
+        let invalid = DiffSliceReference(
+            path: fixture.file.path, hunkIndex: 9, startLine: 10, endLine: 10,
+            startContextHash: hash, endContextHash: hash)
         let validTour = try fixture.tour(
             producer: .workerSupplied, digest: fixture.contextDigest,
             blocks: [.diffSlice(valid)])
@@ -105,8 +110,14 @@ struct TourWorkspaceFeatureTests {
             oldLineCount: 12, newLineCount: 12, hunks: [replacement])
         let manifest = fixture.manifest(files: [renamed])
         let resolver = ExactTourArtifactResolver(git: FakeGit(manifest: manifest))
-        let old = DiffSliceReference(path: "Sources/Old.swift", hunkIndex: 0, side: .old, startLine: 10, endLine: 10)
-        let new = DiffSliceReference(path: "Sources/New.swift", hunkIndex: 0, side: .new, startLine: 10, endLine: 10)
+        let oldHash = replacement.lines[0].contextHash
+        let newHash = replacement.lines[1].contextHash
+        let old = DiffSliceReference(
+            path: "Sources/Old.swift", hunkIndex: 0, side: .old, startLine: 10, endLine: 10,
+            startContextHash: oldHash, endContextHash: oldHash)
+        let new = DiffSliceReference(
+            path: "Sources/New.swift", hunkIndex: 0, side: .new, startLine: 10, endLine: 10,
+            startContextHash: newHash, endContextHash: newHash)
         let oldSlice = try await resolver.resolve(old, revision: fixture.revision)
         let newSlice = try await resolver.resolve(new, revision: fixture.revision)
         try expect(oldSlice.lines.map(\.text) == ["old value"], "old-side replacement included new content")
@@ -119,12 +130,17 @@ struct TourWorkspaceFeatureTests {
             path: "Sources/Gone.swift", status: .deleted, additions: 0, deletions: 1,
             binary: false, truncated: false, hunks: [deletionOnly])
         let deletionResolver = ExactTourArtifactResolver(git: FakeGit(manifest: fixture.manifest(files: [deleted])))
+        let deletedHash = deletionOnly.lines[0].contextHash
         _ = try await deletionResolver.resolve(
-            DiffSliceReference(path: deleted.path, hunkIndex: 0, side: .old, startLine: 20, endLine: 20),
+            DiffSliceReference(
+                path: deleted.path, hunkIndex: 0, side: .old, startLine: 20, endLine: 20,
+                startContextHash: deletedHash, endContextHash: deletedHash),
             revision: fixture.revision)
         do {
             _ = try await deletionResolver.resolve(
-                DiffSliceReference(path: deleted.path, hunkIndex: 0, side: .new, startLine: 20, endLine: 20),
+                DiffSliceReference(
+                    path: deleted.path, hunkIndex: 0, side: .new, startLine: 20, endLine: 20,
+                    startContextHash: deletedHash, endContextHash: deletedHash),
                 revision: fixture.revision)
             throw TestFailure("zero-count new side resolved")
         } catch TourIntegrationError.invalidPayload {}
@@ -136,7 +152,9 @@ struct TourWorkspaceFeatureTests {
         let truncatedResolver = ExactTourArtifactResolver(git: FakeGit(manifest: fixture.manifest(files: [truncated])))
         do {
             _ = try await truncatedResolver.resolve(
-                DiffSliceReference(path: truncated.path, hunkIndex: 0, side: .new, startLine: 10, endLine: 13),
+                DiffSliceReference(
+                    path: truncated.path, hunkIndex: 0, side: .new, startLine: 10, endLine: 13,
+                    startContextHash: newHash, endContextHash: newHash),
                 revision: fixture.revision)
             throw TestFailure("noncontiguous truncated slice resolved")
         } catch TourIntegrationError.invalidPayload {}

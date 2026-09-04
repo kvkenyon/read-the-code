@@ -8,6 +8,7 @@ const expectedDependencies = {
   ReadTheCode: [
     'RTCContracts',
     'RTCDesign',
+    'RTCExport',
     'RTCInboxFeature',
     'RTCIngest',
     'RTCDomain',
@@ -49,6 +50,7 @@ const expectedDependencies = {
   RTCIngest: ['GRDB', 'RTCContracts', 'RTCGit', 'RTCIPC', 'RTCLifecycle', 'RTCStore'],
   RTCInboxFeature: ['RTCContracts', 'RTCDesign', 'RTCIngest'],
   RTCWorkspaceShell: ['RTCAgentChat', 'RTCContracts', 'RTCDesign'],
+  RTCExport: ['RTCContracts', 'RTCDiagram', 'RTCIPC', 'RTCReview', 'RTCTour'],
   RTCReviewWorkspace: [
     'RTCContracts',
     'RTCDiffCanvas',
@@ -72,6 +74,7 @@ const expectedDependencies = {
   RTCDiagramTests: ['RTCContracts', 'RTCDiagram'],
   RTCDiffCanvasTests: ['RTCContracts', 'RTCDiffCanvas'],
   RTCDomainTests: ['RTCContracts', 'RTCDomain'],
+  RTCExportTests: ['RTCContracts', 'RTCExport', 'RTCIPC', 'RTCReview'],
   RTCIPCTests: ['RTCContracts', 'RTCIPC'],
   RTCAgentChatSmokeTests: ['RTCAgentChat', 'RTCContracts', 'RTCIPC', 'RTCStore'],
   RTCLifecycleTests: ['RTCContracts', 'RTCLifecycle'],
@@ -212,6 +215,7 @@ for (const [directory, packageType, xcodeType] of [
   ['RTCDiagramTests', 'executable', 'tool'],
   ['RTCDiffCanvasTests', 'executable', 'tool'],
   ['RTCDomainTests', 'executable', 'tool'],
+  ['RTCExportTests', 'executable', 'tool'],
   ['RTCIPCTests', 'executable', 'tool'],
   ['RTCAgentChatSmokeTests', 'executable', 'tool'],
   ['RTCLifecycleTests', 'executable', 'tool'],

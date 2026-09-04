@@ -131,7 +131,7 @@ public enum StrictTourDecoder {
             try keys(
                 object(payload["_0"]),
                 allowed: ["path", "hunkIndex", "side", "startLine", "endLine", "startContextHash", "endContextHash"],
-                required: ["path", "hunkIndex", "side", "startLine", "endLine"])
+                required: ["path", "hunkIndex", "side", "startLine", "endLine", "startContextHash", "endContextHash"])
         case "diagram":
             try keys(payload, exactly: ["_0"]); try validateDiagram(object(payload["_0"]))
         default: throw TourIntegrationError.invalidPayload

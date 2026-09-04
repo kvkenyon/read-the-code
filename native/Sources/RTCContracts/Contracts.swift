@@ -331,13 +331,13 @@ public struct ReviewFocus: Codable, Hashable, Sendable {
 }
 public struct DiffSliceReference: Codable, Hashable, Sendable {
     public let path: String, hunkIndex: Int, side: AnchorSide, startLine: Int, endLine: Int,
-        startContextHash: SHA256Digest?, endContextHash: SHA256Digest?
+        startContextHash: SHA256Digest, endContextHash: SHA256Digest
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self); path = try c.decode(String.self, forKey: .path);
         hunkIndex = try c.decode(Int.self, forKey: .hunkIndex); side = try c.decode(AnchorSide.self, forKey: .side);
         startLine = try c.decode(Int.self, forKey: .startLine); endLine = try c.decode(Int.self, forKey: .endLine);
-        startContextHash = try c.decodeIfPresent(SHA256Digest.self, forKey: .startContextHash);
-        endContextHash = try c.decodeIfPresent(SHA256Digest.self, forKey: .endContextHash);
+        startContextHash = try c.decode(SHA256Digest.self, forKey: .startContextHash);
+        endContextHash = try c.decode(SHA256Digest.self, forKey: .endContextHash);
         guard !path.isEmpty, path.utf8.count <= RTCConstants.maxPathBytes, !path.hasPrefix("/"),
             !path.split(separator: "/").contains(".."), hunkIndex >= 0, startLine > 0, endLine >= startLine
         else { throw RTCContractError.invalid("diff slice") }

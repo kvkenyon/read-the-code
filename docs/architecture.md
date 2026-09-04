@@ -1,5 +1,7 @@
 # Architecture
 
+This page describes the shipped Node/browser product. The compiled native module graph, including its source-only diagnostic IPC service composition and remaining product wiring, is documented in [`native-architecture.md`](native-architecture.md).
+
 Read the Code is one npm package with three deliberately small layers:
 
 ```text
