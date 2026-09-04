@@ -162,8 +162,13 @@ private enum ReviewJSONShape {
     }
 
     static func reviewID(_ value: Any?) throws {
-        let object = try object(value, required: ["value"])
-        let id = try string(object["value"])
+        let id: String
+        if let scalar = value as? String {
+            id = scalar
+        } else {
+            let object = try object(value, required: ["value"])
+            id = try string(object["value"])
+        }
         guard id.count == 24, id.allSatisfy(\.isHexDigit) else { throw invalid }
     }
 

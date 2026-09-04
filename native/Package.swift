@@ -19,6 +19,8 @@ let libraryTargets = [
     "RTCDesign",
     "RTCLifecycle",
     "RTCSettings",
+    "RTCIngest",
+    "RTCInboxFeature",
     "RTCWorkspaceShell",
     "RTCReviewWorkspace",
     "RTCCLI",
@@ -79,11 +81,27 @@ let package = Package(
         .target(name: "RTCDesign"),
         .target(name: "RTCLifecycle", dependencies: ["RTCContracts"]),
         .target(name: "RTCSettings", dependencies: ["RTCContracts", "RTCModelAdapters", "RTCLifecycle"]),
+        .target(
+            name: "RTCIngest",
+            dependencies: [
+                "RTCContracts",
+                "RTCGit",
+                "RTCIPC",
+                "RTCLifecycle",
+                "RTCStore",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
+        .target(
+            name: "RTCInboxFeature",
+            dependencies: ["RTCContracts", "RTCDesign", "RTCIngest"],
+            path: "Features/Inbox"
+        ),
         .target(name: "RTCWorkspaceShell", dependencies: ["RTCDesign", "RTCContracts", "RTCAgentChat"]),
         .target(name: "RTCReviewWorkspace", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCSyntax", "RTCDiffCanvas", "RTCDesign", "RTCWorkspaceShell"]),
         .target(
             name: "RTCCLI",
-            dependencies: ["RTCIPC"],
+            dependencies: ["RTCContracts", "RTCGit", "RTCIngest", "RTCIPC"],
             path: "CLI/rtc",
             exclude: ["main.swift"],
             sources: ["RTCCLI.swift"]
@@ -112,6 +130,8 @@ let package = Package(
                 "RTCIPC",
                 "RTCReview",
                 "RTCDesign",
+                "RTCInboxFeature",
+                "RTCIngest",
                 "RTCLifecycle",
                 "RTCSettings",
             ],
@@ -161,5 +181,15 @@ let package = Package(
             path: "Tests/TourWorkspaceFeatureTests"
         ),
         .executableTarget(name: "RTCReviewWorkspaceFeatureTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCDiffCanvas", "RTCReviewWorkspace"], path: "Tests/RTCReviewWorkspaceFeatureTests"),
+        .executableTarget(
+            name: "RTCIngestTests",
+            dependencies: ["RTCCLI", "RTCContracts", "RTCGit", "RTCIngest", "RTCIPC", "RTCLifecycle", "RTCStore"],
+            path: "Tests/RTCIngestTests"
+        ),
+        .executableTarget(
+            name: "RTCInboxFeatureTests",
+            dependencies: ["RTCContracts", "RTCInboxFeature", "RTCIngest"],
+            path: "Tests/RTCInboxFeatureTests"
+        ),
     ]
 )

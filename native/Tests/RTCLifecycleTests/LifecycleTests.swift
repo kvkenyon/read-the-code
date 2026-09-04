@@ -23,6 +23,18 @@ final class RecordingPresenter: NotificationPresenter, @unchecked Sendable {
         check(presenter.requests.count == 1, "duplicate notification")
         check(presenter.requests[0].privatePreview == false, "generic preview")
 
+        let crashPresenter = CrashAwarePresenter()
+        let crashStore = FailingDeliveryStore()
+        let firstAttempt = DeduplicatingNotificationService(presenter: crashPresenter, deliveryStore: crashStore)
+        do { try await firstAttempt.notify(reviewID: review, generic: true); preconditionFailure("delivery mark failure") }
+        catch DeliveryProbe.failure {}
+        let resumed = DeduplicatingNotificationService(presenter: crashPresenter, deliveryStore: crashStore)
+        try await resumed.notify(reviewID: review, generic: true)
+        let crashCount = await crashPresenter.count
+        let crashPermissionRequests = await crashPresenter.permissionRequests
+        check(crashCount == 1, "platform identifier reconciles crash after presentation")
+        check(crashPermissionRequests == 0, "background delivery never requests permission")
+
         let received = ReceivedEvents()
         let registrar = InMemoryLaunchAtLoginRegistrar()
         let lifecycle = LifecycleCoordinator(registrar: registrar) { event in received.append(event) }
@@ -44,4 +56,27 @@ final class RecordingPresenter: NotificationPresenter, @unchecked Sendable {
         func append(_ event: ActivationRouteEvent) { lock.lock(); events.append(event); lock.unlock() }
         func values() -> [ActivationRouteEvent] { lock.lock(); defer { lock.unlock() }; return events }
     }
+}
+
+private enum DeliveryProbe: Error { case failure }
+
+private actor FailingDeliveryStore: NotificationDeliveryStore {
+    private var delivered = false
+    private var failures = 1
+    func wasDelivered(reviewID: ReviewID) async throws -> Bool { delivered }
+    func markDelivered(reviewID: ReviewID) async throws {
+        if failures > 0 { failures -= 1; throw DeliveryProbe.failure }
+        delivered = true
+    }
+}
+
+private actor CrashAwarePresenter: NotificationPresenter {
+    private var presented = Set<ReviewID>()
+    private(set) var permissionRequests = 0
+    var count: Int { presented.count }
+    func authorization() async -> NotificationAuthorization { .authorized }
+    func requestAuthorization() async throws -> NotificationAuthorization { permissionRequests += 1; return .authorized }
+    func present(_ request: NotificationRequestData) async throws { presented.insert(request.reviewID) }
+    func setBadge(_ value: Int) async {}
+    func hasPendingOrDelivered(reviewID: ReviewID) async -> Bool { presented.contains(reviewID) }
 }

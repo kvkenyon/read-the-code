@@ -24,7 +24,7 @@ final class GitEngineTests: XCTestCase {
 
 private actor RecordingRunner: GitProcessRunning {
     var arguments = [String]()
-    func run(repository: String, arguments: [String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
+    func run(repository: String, arguments: [String], environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
         self.arguments = arguments
         throw GitEngineError.invalidRef
     }

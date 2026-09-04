@@ -14,6 +14,15 @@ public enum IPCConstants {
     public static let protocolMinor = 0
 }
 
+public func syncIPCDirectory(_ directory: URL) throws {
+    let fd = open(directory.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { throw IPCTransportError.writeFailed }
+    defer { close(fd) }
+    var info = stat()
+    guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+          fsync(fd) == 0 else { throw IPCTransportError.writeFailed }
+}
+
 public struct IPCProtocolVersion: Codable, Equatable, Sendable {
     public let major: Int
     public let minor: Int
@@ -103,10 +112,22 @@ public struct IPCScopedCapabilityStore: IPCCapabilityStore, Sendable {
     private let grants: [String: Set<String>]
     public init(_ grants: [String: Set<String>]) { self.grants = grants }
     public func isAuthorized(_ capability: String, operation: String) -> Bool {
-        guard !capability.isEmpty, !operation.isEmpty, let operations = grants[capability] else { return false }
-        return operations.contains(operation)
+        guard !capability.isEmpty, !operation.isEmpty else { return false }
+        // Compare every token to avoid leaking which prefix matched.
+        var allowed = false
+        for (token, operations) in grants {
+            let lhs = Array(token.utf8), rhs = Array(capability.utf8)
+            var difference = UInt8(lhs.count == rhs.count ? 0 : 1)
+            for index in 0..<max(lhs.count, rhs.count) {
+                difference |= (index < lhs.count ? lhs[index] : 0) ^ (index < rhs.count ? rhs[index] : 0)
+            }
+            allowed = allowed || (difference == 0 && operations.contains(operation))
+        }
+        return allowed
     }
 }
+
+public typealias IPCOperationAllowList = IPCScopedCapabilityStore
 
 public struct IPCDispatcher: Sendable {
     public let handler: any IPCOperationHandler
@@ -128,7 +149,8 @@ public struct IPCDispatcher: Sendable {
         } catch let error as IPCWireError {
             return (try? IPCFrameCodec.encode(IPCEnvelopeResponse(requestID: UUID(), error: error))) ?? Data()
         } catch let error as IPCFrameError {
-            let code = error == .oversize(0) ? "LIMIT_EXCEEDED" : "INVALID_ARGUMENT"
+            let code: String
+            if case .oversize = error { code = "LIMIT_EXCEEDED" } else { code = "INVALID_ARGUMENT" }
             return (try? IPCFrameCodec.encode(IPCEnvelopeResponse(requestID: UUID(), error: .init(code: code, message: "Malformed IPC request")))) ?? Data()
         } catch { return (try? IPCFrameCodec.encode(IPCEnvelopeResponse(requestID: UUID(), error: .init(code: "INVALID_ARGUMENT", message: "Malformed IPC request")))) ?? Data() }
     }
@@ -381,13 +403,45 @@ private func SocketPoll(_ descriptor: inout pollfd, _ timeout: Int32) -> Int32 {
 
 public struct SpoolTransport: Sendable {
     public let directory: URL
-    public init(directory: URL) throws { self.directory = directory; try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+    public init(directory: URL) throws {
+        self.directory = directory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var info = stat()
+        guard lstat(directory.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == geteuid(), chmod(directory.path, 0o700) == 0 else { throw IPCTransportError.unavailable }
+    }
     public func write(_ envelope: Data, id: UUID = UUID()) throws -> URL {
-        guard envelope.count <= IPCConstants.maxFrameBytes else { throw IPCFrameError.oversize(envelope.count) }
-        let tmp = directory.appendingPathComponent(".\(id.uuidString).tmp"), destination = directory.appendingPathComponent("\(id.uuidString).spool")
-        try envelope.write(to: tmp, options: [.atomic]); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path); try FileManager.default.moveItem(at: tmp, to: destination); return destination
+        guard envelope.count <= IPCConstants.maxFrameBytes + 4 else { throw IPCFrameError.oversize(envelope.count) }
+        let tmp = directory.appendingPathComponent(".\(id.uuidString).\(UUID().uuidString).tmp")
+        let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw IPCTransportError.writeFailed }
+        var isOpen = true
+        defer { if isOpen { close(fd) } }
+        do {
+            try envelope.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    let count = SocketWrite(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                    if count > 0 { offset += count; continue }
+                    if count < 0, errno == EINTR { continue }
+                    throw IPCTransportError.writeFailed
+                }
+            }
+            guard fsync(fd) == 0 else { throw IPCTransportError.writeFailed }
+            close(fd); isOpen = false
+            var destination = directory.appendingPathComponent("\(id.uuidString).spool")
+            if FileManager.default.fileExists(atPath: destination.path) { destination = directory.appendingPathComponent("\(id.uuidString)-\(UUID().uuidString).spool") }
+            try FileManager.default.moveItem(at: tmp, to: destination)
+            try syncIPCDirectory(directory)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: tmp); throw error
+        }
     }
     public func replay(_ consume: (Data) throws -> Void) throws {
-        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "spool" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) { try consume(Data(contentsOf: url)); try FileManager.default.removeItem(at: url) }
+        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "spool" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            try consume(Data(contentsOf: url))
+            try FileManager.default.removeItem(at: url)
+            try syncIPCDirectory(directory)
+        }
     }
 }

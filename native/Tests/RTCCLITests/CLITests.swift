@@ -8,6 +8,9 @@ import RTCCLI
         check(try parser.parse(["conversation", "poll", "abc", "--after", "4", "--timeout", "2m"]) == .poll(review: "abc", after: 4, timeoutMilliseconds: 120_000, full: false, json: false, conversation: true), "conversation")
         check((try? parser.parse(["submit", "--repo", "/tmp/repo"])) == nil, "missing")
         check((try? parser.parse(["poll", "abc", "--after", "0", "--timeout", "61m"])) == nil, "bounded timeout")
+        check((try? parser.parse(["status", "abc", "extra"])) == nil, "reject trailing arguments")
+        check((try? parser.parse(["submit", "--repo", "/tmp/repo", "--base", "main", "--head", "HEAD", "--unknown"])) == nil, "reject unknown flags")
+        check((try? parser.parse(Array(repeating: "x", count: 65))) == nil, "bound argument count")
     }
     static func check(_ condition: Bool, _ message: String) { precondition(condition, message) }
 }

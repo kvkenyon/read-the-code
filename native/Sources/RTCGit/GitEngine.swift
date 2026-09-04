@@ -24,7 +24,13 @@ public struct GitProcessResult: Sendable {
 }
 
 public protocol GitProcessRunning: Sendable {
-    func run(repository: String, arguments: [String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult
+    func run(repository: String, arguments: [String], environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult
+}
+
+public extension GitProcessRunning {
+    func run(repository: String, arguments: [String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
+        try await run(repository: repository, arguments: arguments, environment: [:], outputLimit: outputLimit, timeout: timeout)
+    }
 }
 
 private final class ProcessBox: @unchecked Sendable {
@@ -38,14 +44,25 @@ public struct SystemGitProcessRunner: GitProcessRunning {
     public static let executable = "/usr/bin/git"
     public init() {}
 
-    public func run(repository: String, arguments: [String], outputLimit: Int = RTCConstants.maxPatchBytesTotal + 128_000, timeout: Duration = .seconds(30)) async throws -> GitProcessResult {
+    public func run(repository: String, arguments: [String], environment: [String: String] = [:], outputLimit: Int = RTCConstants.maxPatchBytesTotal + 128_000, timeout: Duration = .seconds(30)) async throws -> GitProcessResult {
         let box = ProcessBox()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: Self.executable)
                 process.arguments = ["-C", repository] + arguments
-                process.environment = ["PATH": "/usr/bin:/bin", "HOME": "/var/empty", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"]
+                var policyEnvironment = [
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": "/var/empty",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_SYSTEM": "/dev/null",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_ATTR_NOSYSTEM": "1",
+                    "GIT_NO_REPLACE_OBJECTS": "1",
+                    "GIT_OPTIONAL_LOCKS": "0",
+                ]
+                if let attributesSource = environment["GIT_ATTR_SOURCE"] { policyEnvironment["GIT_ATTR_SOURCE"] = attributesSource }
+                process.environment = policyEnvironment
                 let out = Pipe(), err = Pipe()
                 process.standardOutput = out; process.standardError = err
                 box.set(process)
@@ -57,7 +74,7 @@ public struct SystemGitProcessRunner: GitProcessRunning {
                     err.fileHandleForReading.readabilityHandler = nil
                     state.finish(stdout: out.fileHandleForReading.readDataToEndOfFile(), stderr: err.fileHandleForReading.readDataToEndOfFile(), status: process.terminationStatus)
                 }
-                do { try process.run() } catch { continuation.resume(throwing: GitEngineError.gitFailed) }
+                do { try process.run() } catch { state.fail(GitEngineError.gitFailed) }
                 Task {
                     do { try await Task.sleep(for: timeout); if !Task.isCancelled { state.timeout(); box.terminate() } }
                     catch { }
@@ -78,11 +95,15 @@ private final class OutputState: @unchecked Sendable {
         if stdout.count + stderr.count > limit { completed=true; process.terminate(); continuation.resume(throwing: GitEngineError.outputLimit) }
     }
     func timeout() { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; timedOut=true }
+    func fail(_ error: Error) { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed = true; continuation.resume(throwing: error) }
     func finish(stdout: Data, stderr: Data, status: Int32) {
         lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed=true
+        self.stdout.append(stdout)
+        self.stderr.append(stderr)
         if timedOut { continuation.resume(throwing: GitEngineError.timedOut) }
+        else if self.stdout.count + self.stderr.count > limit { continuation.resume(throwing: GitEngineError.outputLimit) }
         else if status != 0 { continuation.resume(throwing: GitEngineError.gitFailed) }
-        else { continuation.resume(returning: GitProcessResult(stdout: stdout, stderr: stderr, status: status)) }
+        else { continuation.resume(returning: GitProcessResult(stdout: self.stdout, stderr: self.stderr, status: status)) }
     }
 }
 
@@ -91,29 +112,62 @@ public actor ExactGitEngine: GitService {
     private var cancellationRequested = false
     public init(runner: any GitProcessRunning = SystemGitProcessRunner()) { self.runner = runner }
 
+    public struct ResolvedSubmission: Codable, Hashable, Sendable {
+        public let revision: RevisionIdentity
+        public let repositoryIdentity: SHA256Digest
+        public init(revision: RevisionIdentity, repositoryIdentity: SHA256Digest) {
+            self.revision = revision
+            self.repositoryIdentity = repositoryIdentity
+        }
+    }
+
+    /// Resolves labels before durable delivery and captures the repository object-store identity.
+    public func resolveSubmission(repositoryPath: String, base: String, head: String) async throws -> ResolvedSubmission {
+        let repository = try await resolveRepository(repositoryPath)
+        let baseSHA = try await resolveCommit(repository, base)
+        let headSHA = try await resolveCommit(repository, head)
+        let revision = try RevisionIdentity(repositoryPath: repository, baseSHA: baseSHA, headSHA: headSHA)
+        return ResolvedSubmission(revision: revision, repositoryIdentity: try await repositoryIdentity(repository))
+    }
+
+    public func resolveRevision(repositoryPath: String, base: String, head: String) async throws -> RevisionIdentity {
+        try await resolveSubmission(repositoryPath: repositoryPath, base: base, head: head).revision
+    }
+
     public func materialize(_ revision: RevisionIdentity) async throws -> ReviewManifest {
+        try await materialize(revision, repositoryIdentity: nil)
+    }
+
+    public func materialize(_ revision: RevisionIdentity, repositoryIdentity expectedIdentity: SHA256Digest?) async throws -> ReviewManifest {
         cancellationRequested = false
         let repository = try await resolveRepository(revision.repositoryPath)
+        guard repository == revision.repositoryPath else { throw GitEngineError.invalidRepository }
+        if let expectedIdentity, try await repositoryIdentity(repository) != expectedIdentity { throw GitEngineError.invalidRepository }
         let base = try await resolveCommit(repository, revision.baseSHA)
         let head = try await resolveCommit(repository, revision.headSHA)
         guard base == revision.baseSHA.lowercased(), head == revision.headSHA.lowercased() else { throw GitEngineError.invalidRef }
-        let names = try await nameStatus(repository, base: base, head: head)
+        let isolatedRepository = try await makeIsolatedRepository(repository, head: head)
+        defer { try? FileManager.default.removeItem(at: isolatedRepository) }
+        let evidenceRepository = isolatedRepository.path
+        let names = try await nameStatus(evidenceRepository, base: base, head: head)
         guard names.count <= RTCConstants.maxFiles else { throw GitEngineError.tooManyFiles }
         var files = [DiffArtifact](); var totalPatch = 0
         for change in names {
             try checkCancellation()
             let oldPath = change.oldPath ?? change.path
-            let oldSize = change.status == .added ? 0 : try await blobSize(repository, sha: base, path: oldPath)
-            let newSize = change.status == .deleted ? 0 : try await blobSize(repository, sha: head, path: change.path)
-            let stats = try await numstat(repository, base: base, head: head, paths: [oldPath, change.path])
+            let oldSize = change.status == .added ? 0 : try await blobSize(evidenceRepository, sha: base, path: oldPath)
+            let newSize = change.status == .deleted ? 0 : try await blobSize(evidenceRepository, sha: head, path: change.path)
+            let stats = try await numstat(evidenceRepository, base: base, head: head, paths: [oldPath, change.path])
             let truncated = max(oldSize, newSize) > RTCConstants.maxPatchBytesPerFile
             if truncated || stats.binary {
-                files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: stats.binary ? .binary : change.status, additions: stats.additions, deletions: stats.deletions, binary: stats.binary, truncated: truncated, oldLineCount: try await lineCount(repository, sha: base, path: change.status == .added ? nil : oldPath), newLineCount: try await lineCount(repository, sha: head, path: change.status == .deleted ? nil : change.path), hunks: [])); continue
+                let oldLines = oldSize > RTCConstants.maxPatchBytesPerFile ? nil : try await lineCount(evidenceRepository, sha: base, path: change.status == .added ? nil : oldPath)
+                let newLines = newSize > RTCConstants.maxPatchBytesPerFile ? nil : try await lineCount(evidenceRepository, sha: head, path: change.status == .deleted ? nil : change.path)
+                files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: stats.binary ? .binary : change.status, additions: stats.additions, deletions: stats.deletions, binary: stats.binary, truncated: truncated, oldLineCount: oldLines, newLineCount: newLines, hunks: [])); continue
             }
-            let patch = try await run(repository, ["-c", "core.quotePath=true", "diff", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=4", base, head, "--", oldPath, change.path], limit: RTCConstants.maxPatchBytesPerFile + 100_000)
+            let patch = try await run(evidenceRepository, ["-c", "core.quotePath=true", "diff", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=4", base, head, "--", oldPath, change.path], limit: RTCConstants.maxPatchBytesPerFile + 100_000)
             totalPatch += patch.count; guard totalPatch <= RTCConstants.maxPatchBytesTotal else { throw GitEngineError.patchLimit }
             let hunks = try parsePatch(String(decoding: patch, as: UTF8.self), path: change.path)
-            files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: change.status, additions: stats.additions, deletions: stats.deletions, binary: false, truncated: false, oldLineCount: try await lineCount(repository, sha: base, path: oldPath), newLineCount: try await lineCount(repository, sha: head, path: change.path), hunks: hunks))
+            files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: change.status, additions: stats.additions, deletions: stats.deletions, binary: false, truncated: false, oldLineCount: try await lineCount(evidenceRepository, sha: base, path: change.status == .added ? nil : oldPath), newLineCount: try await lineCount(evidenceRepository, sha: head, path: change.status == .deleted ? nil : change.path), hunks: hunks))
         }
         let summary = ReviewSummary(files: files.count, additions: files.reduce(0) { $0 + $1.additions }, deletions: files.reduce(0) { $0 + $1.deletions })
         return ReviewManifest(id: revision.reviewID, revision: revision, createdAt: Date(), updatedAt: Date(), status: .ready, stale: false, summary: summary, files: files)
@@ -144,9 +198,71 @@ public actor ExactGitEngine: GitService {
 
     private func checkCancellation() throws { if cancellationRequested || Task.isCancelled { throw GitEngineError.cancelled } }
 
-    private func run(_ repo: String, _ args: [String], limit: Int = RTCConstants.maxPatchBytesTotal + 128_000) async throws -> Data { try await runner.run(repository: repo, arguments: args, outputLimit: limit, timeout: .seconds(30)).stdout }
-    private func resolveRepository(_ path: String) async throws -> String { let value = try await run(path, ["rev-parse", "--show-toplevel"], limit: 4_096); let root = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines); guard !root.isEmpty else { throw GitEngineError.invalidRepository }; return URL(fileURLWithPath: root).standardizedFileURL.path }
-    private func resolveCommit(_ repo: String, _ ref: String) async throws -> String { guard !ref.isEmpty, !ref.hasPrefix("-"), ref.utf8.count <= 512, !ref.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw GitEngineError.invalidRef }; let value = try await run(repo, ["rev-parse", "--verify", "--end-of-options", "\(ref)^{commit}"], limit: 4_096); let sha = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased(); guard sha.count == 40 || sha.count == 64, sha.allSatisfy(\.isHexDigit) else { throw GitEngineError.invalidRef }; return sha }
+    private func run(_ repo: String, _ args: [String], limit: Int = RTCConstants.maxPatchBytesTotal + 128_000) async throws -> Data {
+        try await runner.run(repository: repo, arguments: args, environment: [:], outputLimit: limit, timeout: .seconds(30)).stdout
+    }
+    private func resolveRepository(_ path: String) async throws -> String {
+        do {
+            let value = try await run(path, ["rev-parse", "--show-toplevel"], limit: 4_096)
+            let root = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !root.isEmpty else { throw GitEngineError.invalidRepository }
+            return URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL.path
+        } catch GitEngineError.gitFailed { throw GitEngineError.invalidRepository }
+    }
+    private func repositoryIdentity(_ repository: String) async throws -> SHA256Digest {
+        let value = try await run(repository, ["rev-parse", "--git-common-dir"], limit: 4_096)
+        let raw = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { throw GitEngineError.invalidRepository }
+        let url = URL(fileURLWithPath: raw, relativeTo: URL(fileURLWithPath: repository, isDirectory: true)).resolvingSymlinksInPath().standardizedFileURL
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let device = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber
+        else { throw GitEngineError.invalidRepository }
+        return SHA256Digest(data: Data("\(url.path)\0\(device.uint64Value)\0\(inode.uint64Value)".utf8))
+    }
+
+    private func makeIsolatedRepository(_ repository: String, head: String) async throws -> URL {
+        let common = String(decoding: try await run(repository, ["rev-parse", "--git-common-dir"], limit: 4_096), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !common.isEmpty else { throw GitEngineError.invalidRepository }
+        let commonURL = URL(fileURLWithPath: common, relativeTo: URL(fileURLWithPath: repository, isDirectory: true))
+            .resolvingSymlinksInPath().standardizedFileURL
+        let objectURL = commonURL.appendingPathComponent("objects", isDirectory: true)
+        guard !objectURL.path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw GitEngineError.invalidRepository }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: objectURL.path, isDirectory: &isDirectory), isDirectory.boolValue else { throw GitEngineError.invalidRepository }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ReadTheCode-Git-\(UUID().uuidString)", isDirectory: true)
+        let objectsInfo = root.appendingPathComponent("objects/info", isDirectory: true)
+        let refs = root.appendingPathComponent("refs", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: objectsInfo, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: refs, withIntermediateDirectories: true)
+            guard chmod(root.path, 0o700) == 0 else { throw GitEngineError.gitFailed }
+            try writeIsolatedFile(root.appendingPathComponent("HEAD"), text: "\(head)\n")
+            try writeIsolatedFile(root.appendingPathComponent("config"), text: "[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+            try writeIsolatedFile(objectsInfo.appendingPathComponent("alternates"), text: "\(objectURL.path)\n")
+            return root
+        } catch {
+            try? FileManager.default.removeItem(at: root)
+            throw error
+        }
+    }
+
+    private func writeIsolatedFile(_ url: URL, text: String) throws {
+        try Data(text.utf8).write(to: url, options: .withoutOverwriting)
+        guard chmod(url.path, 0o600) == 0 else { throw GitEngineError.gitFailed }
+    }
+    private func resolveCommit(_ repo: String, _ ref: String) async throws -> String {
+        guard !ref.isEmpty, !ref.hasPrefix("-"), ref.utf8.count <= 512,
+              !ref.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw GitEngineError.invalidRef }
+        do {
+            let value = try await run(repo, ["rev-parse", "--verify", "--end-of-options", "\(ref)^{commit}"], limit: 4_096)
+            let sha = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard sha.count == 40 || sha.count == 64, sha.allSatisfy(\.isHexDigit) else { throw GitEngineError.invalidRef }
+            return sha
+        } catch GitEngineError.gitFailed { throw GitEngineError.invalidRef }
+    }
     private struct Change { let status: ChangeStatus; let path: String; let oldPath: String? }
     private func nameStatus(_ repo: String, base: String, head: String) async throws -> [Change] { let data = try await run(repo, ["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", base, head, "--"], limit: 2 * 1024 * 1024); let f = String(decoding: data, as: UTF8.self).split(separator: "\0", omittingEmptySubsequences: true).map(String.init); var result=[Change](); var i=0; while i < f.count { let code=f[i]; i += 1; guard i < f.count else { throw GitEngineError.invalidDiff }; if code.first == "R" || code.first == "C" { guard i + 1 < f.count else { throw GitEngineError.invalidDiff }; result.append(Change(status: .renamed, path: f[i+1], oldPath: f[i])); i += 2 } else { let status: ChangeStatus = code.first == "A" ? .added : code.first == "D" ? .deleted : .modified; result.append(Change(status: status, path: f[i], oldPath: nil)); i += 1 } }; return result }
     private struct Stats { let additions: Int; let deletions: Int; let binary: Bool }

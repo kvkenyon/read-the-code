@@ -18,6 +18,8 @@ for test_target in \
     RTCDomainTests \
     RTCIPCTests \
     RTCAgentChatSmokeTests \
+    RTCInboxFeatureTests \
+    RTCIngestTests \
     RTCLifecycleTests \
     RTCReviewPersistenceTests \
     RTCReviewTests \
