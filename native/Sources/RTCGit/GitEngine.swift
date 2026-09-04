@@ -72,19 +72,16 @@ public struct SystemGitProcessRunner: GitProcessRunning {
                     try? stdoutPipe.fileHandleForWriting.close()
                     try? stderrPipe.fileHandleForWriting.close()
                     let state = OutputState(limit: outputLimit, continuation: continuation, process: box)
-                    stdoutPipe.fileHandleForReading.readabilityHandler = { state.append($0.availableData, to: .stdout) }
-                    stderrPipe.fileHandleForReading.readabilityHandler = { state.append($0.availableData, to: .stderr) }
+                    // A pipe has one reader.  Mixing a readability callback with a final
+                    // drain after waitpid races those reads and can lose Git output under
+                    // allocator pressure.  Each stream is read directly through EOF.
+                    Task.detached { drain(stdoutPipe, into: state, stream: .stdout) }
+                    Task.detached { drain(stderrPipe, into: state, stream: .stderr) }
                     Task.detached {
                         var status: Int32 = 0
                         let waited = waitpid(pid, &status, 0)
                         box.clear(pid)
-                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                        stderrPipe.fileHandleForReading.readabilityHandler = nil
-                        state.finish(
-                            stdout: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
-                            stderr: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
-                            status: waited == pid ? status : -1
-                        )
+                        state.processExited(status: waited == pid ? status : -1)
                     }
                     Task {
                         do { try await Task.sleep(for: timeout); if !Task.isCancelled, state.timeout() { box.terminate() } }
@@ -134,25 +131,55 @@ public struct SystemGitProcessRunner: GitProcessRunning {
     }
 }
 
+private func drain(_ pipe: Pipe, into state: OutputState, stream: OutputState.Stream) {
+    let descriptor = pipe.fileHandleForReading.fileDescriptor
+    var bytes = [UInt8](repeating: 0, count: 16_384)
+    while true {
+        let count = bytes.withUnsafeMutableBytes { buffer in
+            read(descriptor, buffer.baseAddress, buffer.count)
+        }
+        if count > 0 {
+            state.append(Data(bytes: bytes, count: Int(count)), to: stream)
+        } else if count == 0 {
+            state.append(Data(), to: stream)
+            return
+        } else if errno != EINTR {
+            state.append(Data(), to: stream)
+            return
+        }
+    }
+}
+
 private final class OutputState: @unchecked Sendable {
     enum Stream { case stdout, stderr }
     let lock = NSLock(); let limit: Int; let continuation: CheckedContinuation<GitProcessResult, Error>; let process: ProcessBox
     var stdout = Data(), stderr = Data(), completed = false, timedOut = false
+    var stdoutClosed = false, stderrClosed = false, processStatus: Int32?
     init(limit: Int, continuation: CheckedContinuation<GitProcessResult, Error>, process: ProcessBox) { self.limit=limit; self.continuation=continuation; self.process=process }
     func append(_ data: Data, to stream: Stream) {
-        guard !data.isEmpty else { return }; lock.lock(); defer { lock.unlock() }; guard !completed else { return }
+        lock.lock(); defer { lock.unlock() }
+        if data.isEmpty {
+            if stream == .stdout { stdoutClosed = true } else { stderrClosed = true }
+            finishIfComplete()
+            return
+        }
+        guard !completed else { return }
         if stream == .stdout { stdout.append(data) } else { stderr.append(data) }
         if stdout.count + stderr.count > limit { completed=true; process.terminate(); continuation.resume(throwing: GitEngineError.outputLimit) }
     }
     func timeout() -> Bool { lock.lock(); defer { lock.unlock() }; guard !completed else { return false }; timedOut=true; return true }
-    func finish(stdout: Data, stderr: Data, status: Int32) {
-        lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed=true
-        self.stdout.append(stdout)
-        self.stderr.append(stderr)
+    func processExited(status: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        processStatus = status
+        finishIfComplete()
+    }
+    private func finishIfComplete() {
+        guard !completed, stdoutClosed, stderrClosed, let status = processStatus else { return }
+        completed = true
         if timedOut { continuation.resume(throwing: GitEngineError.timedOut) }
-        else if self.stdout.count + self.stderr.count > limit { continuation.resume(throwing: GitEngineError.outputLimit) }
+        else if stdout.count + stderr.count > limit { continuation.resume(throwing: GitEngineError.outputLimit) }
         else if status != 0 { continuation.resume(throwing: GitEngineError.gitFailed) }
-        else { continuation.resume(returning: GitProcessResult(stdout: self.stdout, stderr: self.stderr, status: status)) }
+        else { continuation.resume(returning: GitProcessResult(stdout: stdout, stderr: stderr, status: status)) }
     }
 }
 
