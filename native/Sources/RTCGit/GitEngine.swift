@@ -28,6 +28,13 @@ public protocol GitProcessRunning: Sendable {
     func run(repository: String, arguments: [String], environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult
 }
 
+/// An opt-in extension for Git modes that consume a bounded request on standard input.
+/// Keeping this separate preserves simple process doubles while production can use
+/// `cat-file --batch` without weakening the fixed executable and environment policy.
+public protocol GitBatchProcessRunning: GitProcessRunning {
+    func runBatch(repository: String, arguments: [String], standardInput: Data, environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult
+}
+
 public extension GitProcessRunning {
     func run(repository: String, arguments: [String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
         try await run(repository: repository, arguments: arguments, environment: [:], outputLimit: outputLimit, timeout: timeout)
@@ -42,11 +49,19 @@ private final class ProcessBox: @unchecked Sendable {
     func terminate() { lock.lock(); if let pid { kill(pid, SIGTERM); self.pid = nil }; lock.unlock() }
 }
 
-public struct SystemGitProcessRunner: GitProcessRunning {
+public struct SystemGitProcessRunner: GitBatchProcessRunning {
     public static let executable = "/usr/bin/git"
     public init() {}
 
     public func run(repository: String, arguments: [String], environment: [String: String] = [:], outputLimit: Int = RTCConstants.maxPatchBytesTotal + 128_000, timeout: Duration = .seconds(30)) async throws -> GitProcessResult {
+        try await run(repository: repository, arguments: arguments, standardInput: nil, environment: environment, outputLimit: outputLimit, timeout: timeout)
+    }
+
+    public func runBatch(repository: String, arguments: [String], standardInput: Data, environment: [String: String] = [:], outputLimit: Int = RTCConstants.maxPatchBytesTotal + 128_000, timeout: Duration = .seconds(30)) async throws -> GitProcessResult {
+        try await run(repository: repository, arguments: arguments, standardInput: standardInput, environment: environment, outputLimit: outputLimit, timeout: timeout)
+    }
+
+    private func run(repository: String, arguments: [String], standardInput: Data?, environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
         let box = ProcessBox()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -65,12 +80,19 @@ public struct SystemGitProcessRunner: GitProcessRunning {
                 // Git tree paths are opaque bytes, so launch their UTF-8 bytes directly.
                 let argv = [Self.executable, "-C", repository] + arguments
                 let envp = policyEnvironment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
-                let stdoutPipe = Pipe(), stderrPipe = Pipe()
+                let stdoutPipe = Pipe(), stderrPipe = Pipe(), stdinPipe = standardInput.map { _ in Pipe() }
                 do {
-                    let pid = try spawn(arguments: argv, environment: envp, stdout: stdoutPipe.fileHandleForWriting.fileDescriptor, stderr: stderrPipe.fileHandleForWriting.fileDescriptor)
+                    let pid = try spawn(
+                        arguments: argv,
+                        environment: envp,
+                        standardInput: stdinPipe.map { ($0.fileHandleForReading.fileDescriptor, $0.fileHandleForWriting.fileDescriptor) },
+                        stdout: stdoutPipe.fileHandleForWriting.fileDescriptor,
+                        stderr: stderrPipe.fileHandleForWriting.fileDescriptor
+                    )
                     box.set(pid)
                     try? stdoutPipe.fileHandleForWriting.close()
                     try? stderrPipe.fileHandleForWriting.close()
+                    try? stdinPipe?.fileHandleForReading.close()
                     let state = OutputState(limit: outputLimit, continuation: continuation, process: box)
                     // A pipe has one reader.  Mixing a readability callback with a final
                     // drain after waitpid races those reads and can lose Git output under
@@ -87,9 +109,20 @@ public struct SystemGitProcessRunner: GitProcessRunning {
                         do { try await Task.sleep(for: timeout); if !Task.isCancelled, state.timeout() { box.terminate() } }
                         catch { }
                     }
+                    if let standardInput, let stdinPipe {
+                        do {
+                            try stdinPipe.fileHandleForWriting.write(contentsOf: standardInput)
+                            try stdinPipe.fileHandleForWriting.close()
+                        } catch {
+                            try? stdinPipe.fileHandleForWriting.close()
+                            box.terminate()
+                        }
+                    }
                 } catch {
                     try? stdoutPipe.fileHandleForWriting.close()
                     try? stderrPipe.fileHandleForWriting.close()
+                    try? stdinPipe?.fileHandleForReading.close()
+                    try? stdinPipe?.fileHandleForWriting.close()
                     continuation.resume(throwing: GitEngineError.gitFailed)
                     return
                 }
@@ -97,7 +130,7 @@ public struct SystemGitProcessRunner: GitProcessRunning {
         }, onCancel: { box.terminate() })
     }
 
-    private func spawn(arguments: [String], environment: [String], stdout: Int32, stderr: Int32) throws -> pid_t {
+    private func spawn(arguments: [String], environment: [String], standardInput: (read: Int32, write: Int32)?, stdout: Int32, stderr: Int32) throws -> pid_t {
         guard arguments.allSatisfy({ !$0.utf8.contains(0) }), environment.allSatisfy({ !$0.utf8.contains(0) }) else {
             throw GitEngineError.gitFailed
         }
@@ -120,6 +153,12 @@ public struct SystemGitProcessRunner: GitProcessRunning {
               posix_spawn_file_actions_addclose(&actions, stdout) == 0,
               posix_spawn_file_actions_addclose(&actions, stderr) == 0
         else { throw GitEngineError.gitFailed }
+        if let standardInput {
+            guard posix_spawn_file_actions_adddup2(&actions, standardInput.read, STDIN_FILENO) == 0,
+                  posix_spawn_file_actions_addclose(&actions, standardInput.read) == 0,
+                  posix_spawn_file_actions_addclose(&actions, standardInput.write) == 0
+            else { throw GitEngineError.gitFailed }
+        }
         var pid: pid_t = 0
         let result = argv.withUnsafeMutableBufferPointer { argvBuffer in
             envp.withUnsafeMutableBufferPointer { envpBuffer in
@@ -227,26 +266,52 @@ public actor ExactGitEngine: GitService {
         let evidenceRepository = isolatedRepository.path
         let names = try await nameStatus(evidenceRepository, base: base, head: head)
         guard names.count <= RTCConstants.maxFiles else { throw GitEngineError.tooManyFiles }
+        let statsByChange = try await numstats(evidenceRepository, base: base, head: head, expectedCount: names.count)
+        let blobs = try await blobMetadata(evidenceRepository, base: base, head: head, changes: names)
         var files = [DiffArtifact](); var totalPatch = 0
-        for change in names {
+        let work = zip(names, statsByChange).enumerated().map { (index: $0.offset, change: $0.element.0, stats: $0.element.1) }
+        for start in stride(from: 0, to: work.count, by: 4) {
             try checkCancellation()
-            let oldPath = change.oldPath ?? change.path
-            let oldSize = change.status == .added ? 0 : try await blobSize(evidenceRepository, sha: base, path: oldPath)
-            let newSize = change.status == .deleted ? 0 : try await blobSize(evidenceRepository, sha: head, path: change.path)
-            let stats = try await numstat(evidenceRepository, base: base, head: head, paths: [oldPath, change.path])
-            let truncated = max(oldSize, newSize) > RTCConstants.maxPatchBytesPerFile
-            if truncated || stats.binary {
-                let oldLines = oldSize > RTCConstants.maxPatchBytesPerFile ? nil : try await lineCount(evidenceRepository, sha: base, path: change.status == .added ? nil : oldPath)
-                let newLines = newSize > RTCConstants.maxPatchBytesPerFile ? nil : try await lineCount(evidenceRepository, sha: head, path: change.status == .deleted ? nil : change.path)
-                files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: stats.binary ? .binary : change.status, additions: stats.additions, deletions: stats.deletions, binary: stats.binary, truncated: truncated, oldLineCount: oldLines, newLineCount: newLines, hunks: [])); continue
+            let end = min(start + 4, work.count)
+            let materialized = try await withThrowingTaskGroup(of: MaterializedChange.self) { group in
+                for item in work[start..<end] {
+                    group.addTask {
+                        try await self.materializeChange(item.index, change: item.change, stats: item.stats, blobs: blobs, repository: evidenceRepository, base: base, head: head)
+                    }
+                }
+                var values: [MaterializedChange] = []
+                for try await value in group { values.append(value) }
+                return values.sorted { $0.index < $1.index }
             }
-            let patch = try await run(evidenceRepository, ["-c", "core.quotePath=true", "diff", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=4", base, head, "--", oldPath, change.path], limit: RTCConstants.maxPatchBytesPerFile + 100_000)
-            totalPatch += patch.count; guard totalPatch <= RTCConstants.maxPatchBytesTotal else { throw GitEngineError.patchLimit }
-            let hunks = try parsePatch(String(decoding: patch, as: UTF8.self), path: change.path)
-            files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: change.status, additions: stats.additions, deletions: stats.deletions, binary: false, truncated: false, oldLineCount: try await lineCount(evidenceRepository, sha: base, path: change.status == .added ? nil : oldPath), newLineCount: try await lineCount(evidenceRepository, sha: head, path: change.status == .deleted ? nil : change.path), hunks: hunks))
+            for value in materialized {
+                totalPatch += value.patchBytes
+                guard totalPatch <= RTCConstants.maxPatchBytesTotal else { throw GitEngineError.patchLimit }
+                files.append(value.artifact)
+            }
         }
         let summary = ReviewSummary(files: files.count, additions: files.reduce(0) { $0 + $1.additions }, deletions: files.reduce(0) { $0 + $1.deletions })
         return ReviewManifest(id: revision.reviewID, revision: revision, createdAt: Date(), updatedAt: Date(), status: .ready, stale: false, summary: summary, files: files)
+    }
+
+    private struct MaterializedChange: Sendable { let index: Int; let artifact: DiffArtifact; let patchBytes: Int }
+    private func materializeChange(_ index: Int, change: Change, stats: Stats, blobs: [BlobRequest: BlobMetadata], repository: String, base: String, head: String) async throws -> MaterializedChange {
+        try checkCancellation()
+        let oldPath = change.oldPath ?? change.path
+        let oldBlob = change.status == .added ? nil : blobs[BlobRequest(sha: base, path: oldPath)]
+        let newBlob = change.status == .deleted ? nil : blobs[BlobRequest(sha: head, path: change.path)]
+        let oldSize = oldBlob?.size ?? 0
+        let newSize = newBlob?.size ?? 0
+        let truncated = max(oldSize, newSize) > RTCConstants.maxPatchBytesPerFile
+        if truncated || stats.binary {
+            let oldLines = oldSize > RTCConstants.maxPatchBytesPerFile ? nil : oldBlob?.lineCount
+            let newLines = newSize > RTCConstants.maxPatchBytesPerFile ? nil : newBlob?.lineCount
+            let artifact = DiffArtifact(path: change.path, oldPath: change.oldPath, status: stats.binary ? .binary : change.status, additions: stats.additions, deletions: stats.deletions, binary: stats.binary, truncated: truncated, oldLineCount: oldLines, newLineCount: newLines, hunks: [])
+            return MaterializedChange(index: index, artifact: artifact, patchBytes: 0)
+        }
+        let patch = try await run(repository, ["-c", "core.quotePath=true", "diff", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=4", base, head, "--", oldPath, change.path], limit: RTCConstants.maxPatchBytesPerFile + 100_000)
+        let hunks = try parsePatch(String(decoding: patch, as: UTF8.self), path: change.path)
+        let artifact = DiffArtifact(path: change.path, oldPath: change.oldPath, status: change.status, additions: stats.additions, deletions: stats.deletions, binary: false, truncated: false, oldLineCount: oldBlob?.lineCount, newLineCount: newBlob?.lineCount, hunks: hunks)
+        return MaterializedChange(index: index, artifact: artifact, patchBytes: patch.count)
     }
 
     public func context(_ request: GitContextRequest) async throws -> GitContext {
@@ -276,6 +341,10 @@ public actor ExactGitEngine: GitService {
 
     private func run(_ repo: String, _ args: [String], limit: Int = RTCConstants.maxPatchBytesTotal + 128_000) async throws -> Data {
         try await runner.run(repository: repo, arguments: args, environment: [:], outputLimit: limit, timeout: .seconds(30)).stdout
+    }
+    private func runBatch(_ repo: String, _ args: [String], input: Data, limit: Int) async throws -> Data {
+        guard let batchRunner = runner as? any GitBatchProcessRunning else { throw GitEngineError.gitFailed }
+        return try await batchRunner.runBatch(repository: repo, arguments: args, standardInput: input, environment: [:], outputLimit: limit, timeout: .seconds(30)).stdout
     }
     private func resolveRepository(_ path: String) async throws -> String {
         do {
@@ -339,13 +408,148 @@ public actor ExactGitEngine: GitService {
             return sha
         } catch GitEngineError.gitFailed { throw GitEngineError.invalidRef }
     }
-    private struct Change { let status: ChangeStatus; let path: String; let oldPath: String? }
+    private struct Change: Sendable { let status: ChangeStatus; let path: String; let oldPath: String? }
     private func nameStatus(_ repo: String, base: String, head: String) async throws -> [Change] { let data = try await run(repo, ["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", base, head, "--"], limit: 2 * 1024 * 1024); let f = String(decoding: data, as: UTF8.self).split(separator: "\0", omittingEmptySubsequences: true).map(String.init); var result=[Change](); var i=0; while i < f.count { let code=f[i]; i += 1; guard i < f.count else { throw GitEngineError.invalidDiff }; if code.first == "R" || code.first == "C" { guard i + 1 < f.count else { throw GitEngineError.invalidDiff }; result.append(Change(status: .renamed, path: f[i+1], oldPath: f[i])); i += 2 } else { let status: ChangeStatus = code.first == "A" ? .added : code.first == "D" ? .deleted : .modified; result.append(Change(status: status, path: f[i], oldPath: nil)); i += 1 } }; return result }
-    private struct Stats { let additions: Int; let deletions: Int; let binary: Bool }
-    private func numstat(_ repo: String, base: String, head: String, paths: [String]) async throws -> Stats { let d=try await run(repo,["diff","--numstat","-z","--find-renames","--no-ext-diff","--no-textconv",base,head,"--"]+paths,limit:4096); let p=String(decoding:d,as:UTF8.self).split(separator:"\t",omittingEmptySubsequences:false); guard p.count >= 2 else { return Stats(additions: 0, deletions: 0, binary: false) }; return Stats(additions: Int(p[0]) ?? 0, deletions: Int(p[1]) ?? 0, binary: p[0] == "-" || p[1] == "-") }
+    private struct Stats: Sendable { let additions: Int; let deletions: Int; let binary: Bool }
+    private func numstats(_ repo: String, base: String, head: String, expectedCount: Int) async throws -> [Stats] {
+        let data = try await run(repo, ["diff", "--numstat", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", base, head, "--"], limit: RTCConstants.maxPatchBytesTotal + 128_000)
+        let parsed = try parseNumstats(data)
+        guard parsed.count == expectedCount else { throw GitEngineError.invalidDiff }
+        return parsed
+    }
+
+    private struct BlobRequest: Hashable, Sendable { let sha: String; let path: String }
+    private struct BlobMetadata: Sendable { let size: Int; let lineCount: Int? }
+    private func blobMetadata(_ repo: String, base: String, head: String, changes: [Change]) async throws -> [BlobRequest: BlobMetadata] {
+        var requests: [BlobRequest] = []
+        var seen = Set<BlobRequest>()
+        for change in changes {
+            let oldPath = change.oldPath ?? change.path
+            if change.status != .added {
+                let request = BlobRequest(sha: base, path: oldPath)
+                if seen.insert(request).inserted { requests.append(request) }
+            }
+            if change.status != .deleted {
+                let request = BlobRequest(sha: head, path: change.path)
+                if seen.insert(request).inserted { requests.append(request) }
+            }
+        }
+        guard !requests.isEmpty else { return [:] }
+        guard runner is any GitBatchProcessRunning else {
+            var result: [BlobRequest: BlobMetadata] = [:]
+            for request in requests {
+                let size = try await blobSize(repo, sha: request.sha, path: request.path)
+                let lines = size <= RTCConstants.maxPatchBytesPerFile ? try await lineCount(repo, sha: request.sha, path: request.path) : nil
+                result[request] = BlobMetadata(size: size, lineCount: lines)
+            }
+            return result
+        }
+
+        let sizeInput = batchInput(requests)
+        let sizeOutput = try await runBatch(repo, ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-Z"], input: sizeInput, limit: requests.count * 32 + 4_096)
+        let sizes = try parseBatchSizes(sizeOutput, expectedCount: requests.count)
+        var result = Dictionary(uniqueKeysWithValues: zip(requests, sizes).map { pair in
+            (pair.0, BlobMetadata(size: pair.1, lineCount: nil))
+        })
+
+        let eligible = zip(requests, sizes).filter { $0.1 <= RTCConstants.maxPatchBytesPerFile }
+        var chunk: [(BlobRequest, Int)] = []
+        var chunkBytes = 0
+        func outputLimit(for values: [(BlobRequest, Int)]) -> Int {
+            values.reduce(4_096) { $0 + $1.1 + 32 }
+        }
+        for value in eligible {
+            if !chunk.isEmpty && chunkBytes + value.1 > 4_000_000 {
+                try await fillLineCounts(repo, values: chunk, result: &result, outputLimit: outputLimit(for: chunk))
+                chunk.removeAll(keepingCapacity: true); chunkBytes = 0
+                try checkCancellation()
+            }
+            chunk.append(value); chunkBytes += value.1
+        }
+        if !chunk.isEmpty { try await fillLineCounts(repo, values: chunk, result: &result, outputLimit: outputLimit(for: chunk)) }
+        return result
+    }
+
+    private func fillLineCounts(_ repo: String, values: [(BlobRequest, Int)], result: inout [BlobRequest: BlobMetadata], outputLimit: Int) async throws {
+        let output = try await runBatch(repo, ["cat-file", "--batch=%(objecttype) %(objectsize)", "-Z"], input: batchInput(values.map(\.0)), limit: outputLimit)
+        let blobs = try parseBatchBlobs(output, expectedSizes: values.map(\.1))
+        for (value, blob) in zip(values, blobs) {
+            let lineFeeds = blob.reduce(into: 0) { if $1 == 10 { $0 += 1 } }
+            let lines = blob.isEmpty ? 0 : lineFeeds + (blob.last == 10 ? 0 : 1)
+            result[value.0] = BlobMetadata(size: value.1, lineCount: lines)
+        }
+    }
+
+    private func batchInput(_ requests: [BlobRequest]) -> Data {
+        var input = Data()
+        for request in requests {
+            input.append(contentsOf: request.sha.utf8); input.append(58)
+            input.append(contentsOf: request.path.utf8); input.append(0)
+        }
+        return input
+    }
     private func blobSize(_ repo: String, sha: String, path: String) async throws -> Int { Int(String(decoding: try await run(repo,["cat-file","-s","\(sha):\(path)"],limit:1024),as:UTF8.self).trimmingCharacters(in:.whitespacesAndNewlines)) ?? 0 }
     private func lineCount(_ repo: String, sha: String, path: String?) async throws -> Int? { guard let path else { return nil }; let d=try await run(repo,["cat-file","blob","\(sha):\(path)"],limit:RTCConstants.maxPatchBytesPerFile+1); guard d.count <= RTCConstants.maxPatchBytesPerFile else { return nil }; let s=String(decoding:d,as:UTF8.self); return s.isEmpty ? 0 : s.split(separator:"\n",omittingEmptySubsequences:false).count - (s.hasSuffix("\n") ? 1 : 0) }
     private func blobLines(_ repo: String, sha: String, path: String) async throws -> [String] { let d=try await run(repo,["cat-file","blob","\(sha):\(path)"],limit:RTCConstants.maxPatchBytesPerFile+1); var lines=String(decoding:d,as:UTF8.self).components(separatedBy:"\n"); if lines.last == "" { lines.removeLast() }; return lines }
+
+    private func parseNumstats(_ data: Data) throws -> [Stats] {
+        var index = data.startIndex, result: [Stats] = []
+        while index < data.endIndex {
+            let additions = try readField(data, index: &index, delimiter: 9)
+            let deletions = try readField(data, index: &index, delimiter: 9)
+            guard index < data.endIndex else { throw GitEngineError.invalidDiff }
+            if data[index] == 0 {
+                index += 1
+                _ = try readField(data, index: &index, delimiter: 0)
+                _ = try readField(data, index: &index, delimiter: 0)
+            } else {
+                _ = try readField(data, index: &index, delimiter: 0)
+            }
+            let addText = String(decoding: additions, as: UTF8.self)
+            let deleteText = String(decoding: deletions, as: UTF8.self)
+            let binary = addText == "-" || deleteText == "-"
+            guard binary || (Int(addText) != nil && Int(deleteText) != nil) else { throw GitEngineError.invalidDiff }
+            result.append(Stats(additions: Int(addText) ?? 0, deletions: Int(deleteText) ?? 0, binary: binary))
+        }
+        return result
+    }
+
+    private func parseBatchSizes(_ data: Data, expectedCount: Int) throws -> [Int] {
+        var index = data.startIndex, result: [Int] = []
+        while index < data.endIndex {
+            let field = try readField(data, index: &index, delimiter: 0)
+            let parts = String(decoding: field, as: UTF8.self).split(separator: " ")
+            guard parts.first == "blob" else { throw GitEngineError.gitFailed }
+            guard parts.count == 2, let size = Int(parts[1]), size >= 0 else { throw GitEngineError.invalidDiff }
+            result.append(size)
+        }
+        guard result.count == expectedCount else { throw GitEngineError.invalidDiff }
+        return result
+    }
+
+    private func parseBatchBlobs(_ data: Data, expectedSizes: [Int]) throws -> [Data] {
+        var index = data.startIndex, result: [Data] = []
+        for expectedSize in expectedSizes {
+            let field = try readField(data, index: &index, delimiter: 0)
+            let parts = String(decoding: field, as: UTF8.self).split(separator: " ")
+            guard parts.first == "blob" else { throw GitEngineError.gitFailed }
+            guard parts.count == 2, Int(parts[1]) == expectedSize,
+                  expectedSize <= data.distance(from: index, to: data.endIndex)
+            else { throw GitEngineError.invalidDiff }
+            let end = data.index(index, offsetBy: expectedSize)
+            result.append(data[index..<end]); index = end
+            guard index < data.endIndex, data[index] == 0 else { throw GitEngineError.invalidDiff }
+            index += 1
+        }
+        guard index == data.endIndex else { throw GitEngineError.invalidDiff }
+        return result
+    }
+
+    private func readField(_ data: Data, index: inout Data.Index, delimiter: UInt8) throws -> Data {
+        guard let end = data[index...].firstIndex(of: delimiter) else { throw GitEngineError.invalidDiff }
+        let field = Data(data[index..<end]); index = data.index(after: end)
+        return field
+    }
 }
 
 private func contextHash(path: String, kind: DiffLineKind, old: Int?, new: Int?, text: String, nearby: [String]) -> SHA256Digest {
