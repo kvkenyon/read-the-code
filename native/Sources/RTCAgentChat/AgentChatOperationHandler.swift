@@ -1,6 +1,18 @@
 import Foundation
 import RTCContracts
 
+/// The complete, deliberately small operation vocabulary available to a chat
+/// worker. Keeping it here makes capability grants auditable alongside the
+/// handler; no review mutation verb belongs in this set.
+public enum AgentChatIPCOperation {
+    public static let poll = "pollConversationEvents"
+    public static let reply = "postConversationReply"
+    public static let availability = "setConversationAvailability"
+    public static let acknowledge = "acknowledgeConversationEvents"
+    public static let all: Set<String> = [poll, reply, availability, acknowledge]
+    public static let maximumPayloadBytes = RTCConstants.maxRequestBytes
+}
+
 public struct ConversationPollRequest: Codable, Sendable {
     public let conversationID: UUID
     public let after: Int
@@ -40,16 +52,17 @@ public actor AgentChatOperationHandler: IPCOperationHandler {
         let response: IPCResponse
         do {
             guard let payload = request.payload else { throw AgentChatError.invalidEvent("missing payload") }
-            let snapshot: ConversationSnapshot
+            guard payload.count <= AgentChatIPCOperation.maximumPayloadBytes else { throw AgentChatError.invalidEvent("request limit") }
+            guard AgentChatIPCOperation.all.contains(request.operation.value) else { throw AgentChatError.invalidEvent("unknown chat operation") }
             switch request.operation.value {
-            case "pollConversationEvents":
+            case AgentChatIPCOperation.poll:
                 let poll = try decoder.decode(ConversationPollRequest.self, from: payload)
                 let conversationID = await coordinator.conversationIDValue
                 guard poll.conversationID == conversationID else { throw AgentChatError.invalidEvent("conversation mismatch") }
                 let page = try await coordinator.pollPage(after: poll.after)
                 response = IPCResponse(schemaVersion: RTCConstants.schemaVersion, requestID: request.id, ok: true, error: nil, payload: try encoder.encode(page))
                 return response
-            case "postConversationReply":
+            case AgentChatIPCOperation.reply:
                 let reply = try decoder.decode(ConversationReplyRequest.self, from: payload)
                 let conversationID = await coordinator.conversationIDValue
                 guard reply.conversationID == conversationID else { throw AgentChatError.invalidEvent("conversation mismatch") }
@@ -63,26 +76,25 @@ public actor AgentChatOperationHandler: IPCOperationHandler {
                 let page = ConversationPage(after: committed.events.first!.sequence - 1, nextCursor: committed.events.last!.sequence, events: committed.events, hasMore: false)
                 response = IPCResponse(schemaVersion: RTCConstants.schemaVersion, requestID: request.id, ok: true, error: nil, payload: try encoder.encode(page))
                 return response
-            case "setConversationAvailability":
+            case AgentChatIPCOperation.availability:
                 let availability = try decoder.decode(ConversationAvailabilityRequest.self, from: payload)
                 let conversationID = await coordinator.conversationIDValue
                 guard availability.conversationID == conversationID else { throw AgentChatError.invalidEvent("conversation mismatch") }
-                snapshot = try await coordinator.setAvailability(availability.availability)
+                let snapshot = try await coordinator.setAvailability(availability.availability)
                 let page = ConversationPage(after: max(0, snapshot.cursor - 1), nextCursor: snapshot.cursor, events: Array(snapshot.events.suffix(1)), hasMore: false)
                 response = IPCResponse(schemaVersion: RTCConstants.schemaVersion, requestID: request.id, ok: true, error: nil, payload: try encoder.encode(page))
                 return response
-            case "acknowledgeConversationEvents":
+            case AgentChatIPCOperation.acknowledge:
                 let acknowledgement = try decoder.decode(ConversationAcknowledgementRequest.self, from: payload)
                 let conversationID = await coordinator.conversationIDValue
                 guard acknowledgement.conversationID == conversationID else { throw AgentChatError.invalidEvent("conversation mismatch") }
                 try await coordinator.hydrate()
-                snapshot = try await coordinator.acknowledge(upTo: acknowledgement.cursor)
+                let snapshot = try await coordinator.acknowledge(upTo: acknowledgement.cursor)
                 let page = ConversationPage(after: max(0, snapshot.cursor - 1), nextCursor: snapshot.cursor, events: Array(snapshot.events.suffix(1)), hasMore: false)
                 response = IPCResponse(schemaVersion: RTCConstants.schemaVersion, requestID: request.id, ok: true, error: nil, payload: try encoder.encode(page))
                 return response
             default: throw AgentChatError.invalidEvent("unknown chat operation")
             }
-            response = IPCResponse(schemaVersion: RTCConstants.schemaVersion, requestID: request.id, ok: true, error: nil, payload: try encoder.encode(snapshot.events))
         } catch {
             // Never serialize a thrown value: errors may contain paths, credentials, or prompts.
             let retryable = !(error is AgentChatError)

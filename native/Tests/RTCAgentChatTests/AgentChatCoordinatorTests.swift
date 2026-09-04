@@ -49,6 +49,19 @@ final class AgentChatCoordinatorTests: XCTestCase {
         let invalid = IPCRequest(schemaVersion: 2, id: UUID(), operation: BoundedString("pollConversationEvents"), reviewID: reviewID, payload: invalidPayload)
         XCTAssertFalse((await handler.handle(invalid)).ok)
     }
+
+    func testPromotionIsOnlyAProposalAndDoesNotMutateTheConversation() async throws {
+        let reviewID = try ReviewID("0123456789abcdef01234567")
+        let coordinator = AgentChatCoordinator(reviewID: reviewID, conversationID: UUID(), repository: MemoryRepository(), wakeSink: NoopWake())
+        let body = try RichText(runs: [RichTextRun(kind: .plain, text: BoundedString("proposed review comment"))])
+        let queued = try await coordinator.queueMessage(body)
+        let proposal = try await coordinator.promoteMessage(sequence: queued.cursor)
+        let afterPromotion = try await coordinator.replay()
+
+        XCTAssertEqual(proposal.body, body)
+        XCTAssertEqual(proposal.sequence, queued.cursor)
+        XCTAssertEqual(afterPromotion.events.count, queued.events.count, "promotion is not a review or conversation mutation")
+    }
 }
 
 private actor MemoryRepository: ConversationReplayRepository, ConversationRequestJournal {

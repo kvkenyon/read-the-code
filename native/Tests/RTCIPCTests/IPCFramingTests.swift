@@ -32,8 +32,16 @@ import Glibc
         let dispatcher = IPCDispatcher(
             handler: EchoHandler(),
             peer: AcceptingPeer(),
-            capabilities: IPCAllowList(["test-capability"])
+            capabilities: IPCScopedCapabilityStore(["test-capability": ["echo", "slow"]])
         )
+        let deniedFrame = try dispatchSynchronously(
+            dispatcher,
+            frame: try IPCFrameCodec.encode(IPCEnvelope(operation: "approveReview", capability: "test-capability")),
+            fileDescriptor: -1
+        )
+        let deniedPayload = try IPCFrameCodec.decode(deniedFrame)
+        let denied = try IPCFrameCodec.decodeJSON(IPCEnvelopeResponse.self, from: deniedPayload)
+        check(!denied.ok && denied.error?.code == "UNAUTHORIZED", "chat-style scoped capability cannot dispatch a review decision")
         let acceptedClient = DispatchSemaphore(value: 0)
         let server = IPCServer(
             socketPath: socketPath,
@@ -97,6 +105,21 @@ import Glibc
             check(error == .truncated, "client receive timeout error")
         }
     }
+}
+
+private final class DispatchResultBox: @unchecked Sendable {
+    var value = Data()
+}
+
+private func dispatchSynchronously(_ dispatcher: IPCDispatcher, frame: Data, fileDescriptor: Int32) throws -> Data {
+    let completion = DispatchSemaphore(value: 0)
+    let result = DispatchResultBox()
+    Task {
+        result.value = await dispatcher.dispatch(frame: frame, fileDescriptor: fileDescriptor)
+        completion.signal()
+    }
+    guard completion.wait(timeout: .now() + .seconds(1)) == .success else { throw IPCTransportError.unavailable }
+    return result.value
 }
 
 private func connectRawSocket(to path: String) throws -> Int32 {
