@@ -14,9 +14,12 @@ public struct SubmissionOperationHandler: IPCOperationHandler {
             case "submitReview":
                 let submission = try decode(ReviewSubmission.self, request.payload)
                 payload = try RTCCanonicalJSON.encode(try await coordinator.submit(submission))
-            case "status", "pollReviewEvents":
+            case "status":
                 let lookup = try decode(ReviewLookup.self, request.payload)
                 payload = try RTCCanonicalJSON.encode(try await coordinator.status(lookup.reviewID))
+            case "pollReviewEvents":
+                let lookup = try decode(ReviewLookup.self, request.payload)
+                payload = try RTCCanonicalJSON.encode(try await coordinator.poll(lookup))
             case "closeReview":
                 let lookup = try decode(ReviewLookup.self, request.payload)
                 payload = try RTCCanonicalJSON.encode(try await coordinator.close(lookup.reviewID))

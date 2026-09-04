@@ -58,7 +58,7 @@ const expectedDependencies = {
     'RTCSyntax',
     'RTCWorkspaceShell',
   ],
-  RTCCLI: ['RTCContracts', 'RTCIngest', 'RTCIPC'],
+  RTCCLI: ['RTCContracts', 'RTCGit', 'RTCIngest', 'RTCIPC'],
   RTCTestSupport: ['RTCContracts'],
   RTCAgentChatTests: ['RTCAgentChat', 'RTCContracts'],
   RTCDesignTests: ['RTCDesign'],

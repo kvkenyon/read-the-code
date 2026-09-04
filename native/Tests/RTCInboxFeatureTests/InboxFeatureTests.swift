@@ -22,6 +22,9 @@ struct InboxFeatureTests {
         precondition(snapshot.items(in: .failed).count == 1, "failed section")
         precondition(snapshot.items(in: .stale).count == 1, "stale section")
         precondition(snapshot.items.first?.updatedAt == now, "newest first")
+        precondition(snapshot.items(in: .failed)[0].accessibilityValue.contains("Unread"), "unread accessibility")
+        precondition(snapshot.items(in: .failed)[0].accessibilityValue.contains("Materialization failed"), "failure accessibility")
+        precondition(snapshot.items(in: .pending)[0].accessibilityValue.contains("Materializing"), "pending accessibility")
         print("RTC Inbox feature checks passed")
     }
 
@@ -34,6 +37,7 @@ struct InboxFeatureTests {
         IngestReviewRecord(
             reviewID: revision.reviewID,
             revision: revision,
+            repositoryIdentity: SHA256Digest(data: Data("repository".utf8)),
             baseRef: revision.baseSHA,
             headRef: revision.headSHA,
             title: status.rawValue,

@@ -27,6 +27,10 @@ import Glibc
         check(!chatOnly.isAuthorized("chat-worker", operation: "approveReview"), "chat capability cannot decide review")
         check(!chatOnly.isAuthorized("other", operation: "postConversationReply"), "unknown capability denied")
 
+        let scoped = IPCOperationAllowList(["scoped": ["echo"]])
+        check(scoped.isAuthorized("scoped", operation: "echo"), "capability grants allowed operation")
+        check(!scoped.isAuthorized("scoped", operation: "status"), "capability grants are operation scoped")
+
         let socketPath = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("rtc-ipc-\(UUID().uuidString.prefix(8)).sock")
         let dispatcher = IPCDispatcher(

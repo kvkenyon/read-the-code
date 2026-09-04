@@ -42,6 +42,15 @@ public struct InboxItem: Identifiable, Equatable, Sendable {
         if status == .accepted || status == .materializing { return .pending }
         return .ready
     }
+
+    public var accessibilityValue: String {
+        var parts = [unread ? "Unread" : "Read", section.rawValue]
+        if status == .materializing { parts.append("Materializing committed evidence") }
+        else if status == .accepted { parts.append("Waiting to materialize") }
+        if stale { parts.append("Submitted refs moved") }
+        if let errorMessage { parts.append(errorMessage) }
+        return parts.joined(separator: ", ")
+    }
 }
 
 public struct InboxSnapshot: Equatable, Sendable {
@@ -80,8 +89,7 @@ public final class InboxModel: ObservableObject {
 
     public func refresh() async {
         do {
-            try await coordinator.refreshStaleness()
-            snapshot = InboxSnapshot(records: try await records.reviews())
+            snapshot = InboxSnapshot(records: try await records.reviews(limit: 1_000))
             errorMessage = nil
         } catch {
             errorMessage = "The Inbox could not be refreshed."
@@ -98,32 +106,36 @@ public final class InboxModel: ObservableObject {
     }
 
     public func open(_ item: InboxItem) async {
-        try? await coordinator.markRead(item.id)
-        await refresh()
-        await activate(item.id)
+        do {
+            try await coordinator.markRead(item.id)
+            await refresh()
+            await activate(item.id)
+        } catch {
+            errorMessage = "The review could not be opened."
+        }
     }
 
     public func monitor() async {
-        while !Task.isCancelled {
-            await refresh()
-            try? await Task.sleep(for: .seconds(1))
-        }
+        await refresh()
+        let changes = await records.observeInbox()
+        for await _ in changes where !Task.isCancelled { await refresh() }
     }
 }
 
 public struct InboxView: View {
     @ObservedObject private var model: InboxModel
+    @State private var selection: ReviewID?
 
     public init(model: InboxModel) { self.model = model }
 
     public var body: some View {
         NavigationStack {
-            List {
+            List(selection: $selection) {
                 ForEach(InboxSection.allCases, id: \.self) { section in
                     let items = model.snapshot.items(in: section)
                     if !items.isEmpty {
                         Section(section.rawValue) {
-                            ForEach(items) { item in row(item) }
+                            ForEach(items) { item in row(item).tag(item.id) }
                         }
                     }
                 }
@@ -140,33 +152,48 @@ public struct InboxView: View {
             }
             .task { await model.monitor() }
             .refreshable { await model.refresh() }
+            .onChange(of: model.snapshot) { _, snapshot in
+                if selection == nil { selection = snapshot.items.first?.id }
+            }
+            .onKeyPress(.return) {
+                guard let selected = selection, let item = model.snapshot.items.first(where: { $0.id == selected }) else { return .ignored }
+                Task { await model.open(item); selection = nil }
+                return .handled
+            }
         }
     }
 
     @ViewBuilder
     private func row(_ item: InboxItem) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol(item)).foregroundStyle(color(item))
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(item.title).fontWeight(item.unread ? .semibold : .regular)
-                    Spacer()
-                    RTCBadge(item.section.rawValue, tone: badgeTone(item))
+        HStack(spacing: 8) {
+            Button { Task { await model.open(item) } } label: {
+                HStack(spacing: 12) {
+                    if item.section == .pending { ProgressView().controlSize(.small) }
+                    else { Image(systemName: symbol(item)).foregroundStyle(color(item)) }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(item.title).fontWeight(item.unread ? .semibold : .regular)
+                            Spacer()
+                            RTCBadge(item.section.rawValue, tone: badgeTone(item))
+                        }
+                        Text(item.repositoryName).foregroundStyle(.secondary)
+                        Text("\(item.baseSHA.prefix(8)) → \(item.headSHA.prefix(8))")
+                            .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        if let message = item.errorMessage { Text(message).font(.caption).foregroundStyle(.red) }
+                    }
                 }
-                Text(item.repositoryName).foregroundStyle(.secondary)
-                Text("\(item.baseSHA.prefix(8)) → \(item.headSHA.prefix(8))")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                if let message = item.errorMessage { Text(message).font(.caption).foregroundStyle(.red) }
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("inbox-row-\(item.id.value)")
+            .accessibilityLabel("\(item.title), \(item.repositoryName)")
+            .accessibilityValue(item.accessibilityValue)
             if item.status == .failed {
-                Button("Retry") { Task { await model.retry(item) } }.buttonStyle(.borderless)
+                Button("Retry") { Task { await model.retry(item) } }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("inbox-retry-\(item.id.value)")
+                    .accessibilityLabel("Retry \(item.title)")
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { Task { await model.open(item) } }
-        .accessibilityLabel("\(item.title), \(item.repositoryName), \(item.section.rawValue)")
-        .accessibilityAddTraits(.isButton)
     }
 
     private func symbol(_ item: InboxItem) -> String {

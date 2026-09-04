@@ -24,7 +24,13 @@ public struct GitProcessResult: Sendable {
 }
 
 public protocol GitProcessRunning: Sendable {
-    func run(repository: String, arguments: [String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult
+    func run(repository: String, arguments: [String], environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult
+}
+
+public extension GitProcessRunning {
+    func run(repository: String, arguments: [String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
+        try await run(repository: repository, arguments: arguments, environment: [:], outputLimit: outputLimit, timeout: timeout)
+    }
 }
 
 private final class ProcessBox: @unchecked Sendable {
@@ -38,14 +44,25 @@ public struct SystemGitProcessRunner: GitProcessRunning {
     public static let executable = "/usr/bin/git"
     public init() {}
 
-    public func run(repository: String, arguments: [String], outputLimit: Int = RTCConstants.maxPatchBytesTotal + 128_000, timeout: Duration = .seconds(30)) async throws -> GitProcessResult {
+    public func run(repository: String, arguments: [String], environment: [String: String] = [:], outputLimit: Int = RTCConstants.maxPatchBytesTotal + 128_000, timeout: Duration = .seconds(30)) async throws -> GitProcessResult {
         let box = ProcessBox()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: Self.executable)
                 process.arguments = ["-C", repository] + arguments
-                process.environment = ["PATH": "/usr/bin:/bin", "HOME": "/var/empty", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0"]
+                var policyEnvironment = [
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": "/var/empty",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_SYSTEM": "/dev/null",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_ATTR_NOSYSTEM": "1",
+                    "GIT_NO_REPLACE_OBJECTS": "1",
+                    "GIT_OPTIONAL_LOCKS": "0",
+                ]
+                if let attributesSource = environment["GIT_ATTR_SOURCE"] { policyEnvironment["GIT_ATTR_SOURCE"] = attributesSource }
+                process.environment = policyEnvironment
                 let out = Pipe(), err = Pipe()
                 process.standardOutput = out; process.standardError = err
                 box.set(process)
@@ -57,7 +74,7 @@ public struct SystemGitProcessRunner: GitProcessRunning {
                     err.fileHandleForReading.readabilityHandler = nil
                     state.finish(stdout: out.fileHandleForReading.readDataToEndOfFile(), stderr: err.fileHandleForReading.readDataToEndOfFile(), status: process.terminationStatus)
                 }
-                do { try process.run() } catch { continuation.resume(throwing: GitEngineError.gitFailed) }
+                do { try process.run() } catch { state.fail(GitEngineError.gitFailed) }
                 Task {
                     do { try await Task.sleep(for: timeout); if !Task.isCancelled { state.timeout(); box.terminate() } }
                     catch { }
@@ -78,6 +95,7 @@ private final class OutputState: @unchecked Sendable {
         if stdout.count + stderr.count > limit { completed=true; process.terminate(); continuation.resume(throwing: GitEngineError.outputLimit) }
     }
     func timeout() { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; timedOut=true }
+    func fail(_ error: Error) { lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed = true; continuation.resume(throwing: error) }
     func finish(stdout: Data, stderr: Data, status: Int32) {
         lock.lock(); defer { lock.unlock() }; guard !completed else { return }; completed=true
         self.stdout.append(stdout)
@@ -94,18 +112,37 @@ public actor ExactGitEngine: GitService {
     private var cancellationRequested = false
     public init(runner: any GitProcessRunning = SystemGitProcessRunner()) { self.runner = runner }
 
-    /// Resolves user-facing submission inputs through the same fixed, shell-free Git
-    /// boundary used by materialization and returns the canonical review identity.
-    public func resolveRevision(repositoryPath: String, base: String, head: String) async throws -> RevisionIdentity {
+    public struct ResolvedSubmission: Codable, Hashable, Sendable {
+        public let revision: RevisionIdentity
+        public let repositoryIdentity: SHA256Digest
+        public init(revision: RevisionIdentity, repositoryIdentity: SHA256Digest) {
+            self.revision = revision
+            self.repositoryIdentity = repositoryIdentity
+        }
+    }
+
+    /// Resolves labels before durable delivery and captures the repository object-store identity.
+    public func resolveSubmission(repositoryPath: String, base: String, head: String) async throws -> ResolvedSubmission {
         let repository = try await resolveRepository(repositoryPath)
         let baseSHA = try await resolveCommit(repository, base)
         let headSHA = try await resolveCommit(repository, head)
-        return try RevisionIdentity(repositoryPath: repository, baseSHA: baseSHA, headSHA: headSHA)
+        let revision = try RevisionIdentity(repositoryPath: repository, baseSHA: baseSHA, headSHA: headSHA)
+        return ResolvedSubmission(revision: revision, repositoryIdentity: try await repositoryIdentity(repository))
+    }
+
+    public func resolveRevision(repositoryPath: String, base: String, head: String) async throws -> RevisionIdentity {
+        try await resolveSubmission(repositoryPath: repositoryPath, base: base, head: head).revision
     }
 
     public func materialize(_ revision: RevisionIdentity) async throws -> ReviewManifest {
+        try await materialize(revision, repositoryIdentity: nil)
+    }
+
+    public func materialize(_ revision: RevisionIdentity, repositoryIdentity expectedIdentity: SHA256Digest?) async throws -> ReviewManifest {
         cancellationRequested = false
         let repository = try await resolveRepository(revision.repositoryPath)
+        guard repository == revision.repositoryPath else { throw GitEngineError.invalidRepository }
+        if let expectedIdentity, try await repositoryIdentity(repository) != expectedIdentity { throw GitEngineError.invalidRepository }
         let base = try await resolveCommit(repository, revision.baseSHA)
         let head = try await resolveCommit(repository, revision.headSHA)
         guard base == revision.baseSHA.lowercased(), head == revision.headSHA.lowercased() else { throw GitEngineError.invalidRef }
@@ -120,12 +157,14 @@ public actor ExactGitEngine: GitService {
             let stats = try await numstat(repository, base: base, head: head, paths: [oldPath, change.path])
             let truncated = max(oldSize, newSize) > RTCConstants.maxPatchBytesPerFile
             if truncated || stats.binary {
-                files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: stats.binary ? .binary : change.status, additions: stats.additions, deletions: stats.deletions, binary: stats.binary, truncated: truncated, oldLineCount: try await lineCount(repository, sha: base, path: change.status == .added ? nil : oldPath), newLineCount: try await lineCount(repository, sha: head, path: change.status == .deleted ? nil : change.path), hunks: [])); continue
+                let oldLines = oldSize > RTCConstants.maxPatchBytesPerFile ? nil : try await lineCount(repository, sha: base, path: change.status == .added ? nil : oldPath)
+                let newLines = newSize > RTCConstants.maxPatchBytesPerFile ? nil : try await lineCount(repository, sha: head, path: change.status == .deleted ? nil : change.path)
+                files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: stats.binary ? .binary : change.status, additions: stats.additions, deletions: stats.deletions, binary: stats.binary, truncated: truncated, oldLineCount: oldLines, newLineCount: newLines, hunks: [])); continue
             }
-            let patch = try await run(repository, ["-c", "core.quotePath=true", "diff", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=4", base, head, "--", oldPath, change.path], limit: RTCConstants.maxPatchBytesPerFile + 100_000)
+            let patch = try await run(repository, ["-c", "core.quotePath=true", "diff", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=4", base, head, "--", oldPath, change.path], limit: RTCConstants.maxPatchBytesPerFile + 100_000, attributesSource: head)
             totalPatch += patch.count; guard totalPatch <= RTCConstants.maxPatchBytesTotal else { throw GitEngineError.patchLimit }
             let hunks = try parsePatch(String(decoding: patch, as: UTF8.self), path: change.path)
-            files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: change.status, additions: stats.additions, deletions: stats.deletions, binary: false, truncated: false, oldLineCount: try await lineCount(repository, sha: base, path: oldPath), newLineCount: try await lineCount(repository, sha: head, path: change.path), hunks: hunks))
+            files.append(DiffArtifact(path: change.path, oldPath: change.oldPath, status: change.status, additions: stats.additions, deletions: stats.deletions, binary: false, truncated: false, oldLineCount: try await lineCount(repository, sha: base, path: change.status == .added ? nil : oldPath), newLineCount: try await lineCount(repository, sha: head, path: change.status == .deleted ? nil : change.path), hunks: hunks))
         }
         let summary = ReviewSummary(files: files.count, additions: files.reduce(0) { $0 + $1.additions }, deletions: files.reduce(0) { $0 + $1.deletions })
         return ReviewManifest(id: revision.reviewID, revision: revision, createdAt: Date(), updatedAt: Date(), status: .ready, stale: false, summary: summary, files: files)
@@ -156,13 +195,43 @@ public actor ExactGitEngine: GitService {
 
     private func checkCancellation() throws { if cancellationRequested || Task.isCancelled { throw GitEngineError.cancelled } }
 
-    private func run(_ repo: String, _ args: [String], limit: Int = RTCConstants.maxPatchBytesTotal + 128_000) async throws -> Data { try await runner.run(repository: repo, arguments: args, outputLimit: limit, timeout: .seconds(30)).stdout }
-    private func resolveRepository(_ path: String) async throws -> String { let value = try await run(path, ["rev-parse", "--show-toplevel"], limit: 4_096); let root = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines); guard !root.isEmpty else { throw GitEngineError.invalidRepository }; return URL(fileURLWithPath: root).standardizedFileURL.path }
-    private func resolveCommit(_ repo: String, _ ref: String) async throws -> String { guard !ref.isEmpty, !ref.hasPrefix("-"), ref.utf8.count <= 512, !ref.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw GitEngineError.invalidRef }; let value = try await run(repo, ["rev-parse", "--verify", "--end-of-options", "\(ref)^{commit}"], limit: 4_096); let sha = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased(); guard sha.count == 40 || sha.count == 64, sha.allSatisfy(\.isHexDigit) else { throw GitEngineError.invalidRef }; return sha }
+    private func run(_ repo: String, _ args: [String], limit: Int = RTCConstants.maxPatchBytesTotal + 128_000, attributesSource: String? = nil) async throws -> Data {
+        let environment = attributesSource.map { ["GIT_ATTR_SOURCE": $0] } ?? [:]
+        return try await runner.run(repository: repo, arguments: args, environment: environment, outputLimit: limit, timeout: .seconds(30)).stdout
+    }
+    private func resolveRepository(_ path: String) async throws -> String {
+        do {
+            let value = try await run(path, ["rev-parse", "--show-toplevel"], limit: 4_096)
+            let root = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !root.isEmpty else { throw GitEngineError.invalidRepository }
+            return URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL.path
+        } catch GitEngineError.gitFailed { throw GitEngineError.invalidRepository }
+    }
+    private func repositoryIdentity(_ repository: String) async throws -> SHA256Digest {
+        let value = try await run(repository, ["rev-parse", "--git-common-dir"], limit: 4_096)
+        let raw = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { throw GitEngineError.invalidRepository }
+        let url = URL(fileURLWithPath: raw, relativeTo: URL(fileURLWithPath: repository, isDirectory: true)).resolvingSymlinksInPath().standardizedFileURL
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let device = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber
+        else { throw GitEngineError.invalidRepository }
+        return SHA256Digest(data: Data("\(url.path)\0\(device.uint64Value)\0\(inode.uint64Value)".utf8))
+    }
+    private func resolveCommit(_ repo: String, _ ref: String) async throws -> String {
+        guard !ref.isEmpty, !ref.hasPrefix("-"), ref.utf8.count <= 512,
+              !ref.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw GitEngineError.invalidRef }
+        do {
+            let value = try await run(repo, ["rev-parse", "--verify", "--end-of-options", "\(ref)^{commit}"], limit: 4_096)
+            let sha = String(decoding: value, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard sha.count == 40 || sha.count == 64, sha.allSatisfy(\.isHexDigit) else { throw GitEngineError.invalidRef }
+            return sha
+        } catch GitEngineError.gitFailed { throw GitEngineError.invalidRef }
+    }
     private struct Change { let status: ChangeStatus; let path: String; let oldPath: String? }
-    private func nameStatus(_ repo: String, base: String, head: String) async throws -> [Change] { let data = try await run(repo, ["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", base, head, "--"], limit: 2 * 1024 * 1024); let f = String(decoding: data, as: UTF8.self).split(separator: "\0", omittingEmptySubsequences: true).map(String.init); var result=[Change](); var i=0; while i < f.count { let code=f[i]; i += 1; guard i < f.count else { throw GitEngineError.invalidDiff }; if code.first == "R" || code.first == "C" { guard i + 1 < f.count else { throw GitEngineError.invalidDiff }; result.append(Change(status: .renamed, path: f[i+1], oldPath: f[i])); i += 2 } else { let status: ChangeStatus = code.first == "A" ? .added : code.first == "D" ? .deleted : .modified; result.append(Change(status: status, path: f[i], oldPath: nil)); i += 1 } }; return result }
+    private func nameStatus(_ repo: String, base: String, head: String) async throws -> [Change] { let data = try await run(repo, ["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", base, head, "--"], limit: 2 * 1024 * 1024, attributesSource: head); let f = String(decoding: data, as: UTF8.self).split(separator: "\0", omittingEmptySubsequences: true).map(String.init); var result=[Change](); var i=0; while i < f.count { let code=f[i]; i += 1; guard i < f.count else { throw GitEngineError.invalidDiff }; if code.first == "R" || code.first == "C" { guard i + 1 < f.count else { throw GitEngineError.invalidDiff }; result.append(Change(status: .renamed, path: f[i+1], oldPath: f[i])); i += 2 } else { let status: ChangeStatus = code.first == "A" ? .added : code.first == "D" ? .deleted : .modified; result.append(Change(status: status, path: f[i], oldPath: nil)); i += 1 } }; return result }
     private struct Stats { let additions: Int; let deletions: Int; let binary: Bool }
-    private func numstat(_ repo: String, base: String, head: String, paths: [String]) async throws -> Stats { let d=try await run(repo,["diff","--numstat","-z","--find-renames","--no-ext-diff","--no-textconv",base,head,"--"]+paths,limit:4096); let p=String(decoding:d,as:UTF8.self).split(separator:"\t",omittingEmptySubsequences:false); guard p.count >= 2 else { return Stats(additions: 0, deletions: 0, binary: false) }; return Stats(additions: Int(p[0]) ?? 0, deletions: Int(p[1]) ?? 0, binary: p[0] == "-" || p[1] == "-") }
+    private func numstat(_ repo: String, base: String, head: String, paths: [String]) async throws -> Stats { let d=try await run(repo,["diff","--numstat","-z","--find-renames","--no-ext-diff","--no-textconv",base,head,"--"]+paths,limit:4096,attributesSource:head); let p=String(decoding:d,as:UTF8.self).split(separator:"\t",omittingEmptySubsequences:false); guard p.count >= 2 else { return Stats(additions: 0, deletions: 0, binary: false) }; return Stats(additions: Int(p[0]) ?? 0, deletions: Int(p[1]) ?? 0, binary: p[0] == "-" || p[1] == "-") }
     private func blobSize(_ repo: String, sha: String, path: String) async throws -> Int { Int(String(decoding: try await run(repo,["cat-file","-s","\(sha):\(path)"],limit:1024),as:UTF8.self).trimmingCharacters(in:.whitespacesAndNewlines)) ?? 0 }
     private func lineCount(_ repo: String, sha: String, path: String?) async throws -> Int? { guard let path else { return nil }; let d=try await run(repo,["cat-file","blob","\(sha):\(path)"],limit:RTCConstants.maxPatchBytesPerFile+1); guard d.count <= RTCConstants.maxPatchBytesPerFile else { return nil }; let s=String(decoding:d,as:UTF8.self); return s.isEmpty ? 0 : s.split(separator:"\n",omittingEmptySubsequences:false).count - (s.hasSuffix("\n") ? 1 : 0) }
     private func blobLines(_ repo: String, sha: String, path: String) async throws -> [String] { let d=try await run(repo,["cat-file","blob","\(sha):\(path)"],limit:RTCConstants.maxPatchBytesPerFile+1); var lines=String(decoding:d,as:UTF8.self).components(separatedBy:"\n"); if lines.last == "" { lines.removeLast() }; return lines }

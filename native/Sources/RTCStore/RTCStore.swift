@@ -76,7 +76,7 @@ public actor SQLiteStore {
         try db.writeWithoutTransaction { db in
             try db.execute(
                 sql: "CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, checksum TEXT NOT NULL);")
-            for (id, sql) in [(1, Migration.v1), (2, Migration.v2), (3, Migration.v3), (4, Migration.v4)] {
+            for (id, sql) in [(1, Migration.v1), (2, Migration.v2), (3, Migration.v3), (4, Migration.v4), (5, Migration.v5)] {
                 let checksum = SHA256.hash(data: Data(sql.utf8)).map { String(format: "%02x", $0) }.joined()
                 let existing = try String.fetchOne(db, sql: "SELECT checksum FROM schema_migrations WHERE id = ?", arguments: [id])
                 if let existing, existing != checksum { throw RTCStoreError.corrupt("migration checksum") }
@@ -510,6 +510,42 @@ private enum Migration {
     CREATE TABLE notification_deliveries (
         review_id TEXT PRIMARY KEY,
         delivered_at REAL NOT NULL
+    );
+    """
+
+    static let v5 = """
+    ALTER TABLE ingest_reviews ADD COLUMN repository_identity TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000';
+    ALTER TABLE ingest_reviews ADD COLUMN refresh_error_code TEXT;
+    ALTER TABLE ingest_reviews ADD COLUMN refresh_error_message TEXT;
+    ALTER TABLE ingest_reviews ADD COLUMN change_sequence INTEGER NOT NULL DEFAULT 1;
+    CREATE TABLE ingest_changes (
+        review_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        payload BLOB NOT NULL,
+        created_at REAL NOT NULL,
+        PRIMARY KEY(review_id, sequence)
+    );
+    CREATE TABLE notification_outbox (
+        review_id TEXT PRIMARY KEY,
+        platform_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        available_at REAL NOT NULL,
+        lease_owner TEXT,
+        lease_expires REAL,
+        updated_at REAL NOT NULL
+    );
+    CREATE TABLE spool_retries (
+        file_name TEXT PRIMARY KEY,
+        attempt INTEGER NOT NULL,
+        next_retry REAL NOT NULL,
+        error_code TEXT NOT NULL
+    );
+    CREATE TABLE ingest_runtime_failures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at REAL NOT NULL
     );
     """
 }

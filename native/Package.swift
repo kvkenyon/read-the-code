@@ -101,7 +101,7 @@ let package = Package(
         .target(name: "RTCReviewWorkspace", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCSyntax", "RTCDiffCanvas", "RTCDesign", "RTCWorkspaceShell"]),
         .target(
             name: "RTCCLI",
-            dependencies: ["RTCContracts", "RTCIngest", "RTCIPC"],
+            dependencies: ["RTCContracts", "RTCGit", "RTCIngest", "RTCIPC"],
             path: "CLI/rtc",
             exclude: ["main.swift"],
             sources: ["RTCCLI.swift"]

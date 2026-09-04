@@ -65,6 +65,11 @@ public protocol NotificationPresenter: Sendable {
     func requestAuthorization() async throws -> NotificationAuthorization
     func present(_ request: NotificationRequestData) async throws
     func setBadge(_ value: Int) async
+    func hasPendingOrDelivered(reviewID: ReviewID) async -> Bool
+}
+
+public extension NotificationPresenter {
+    func hasPendingOrDelivered(reviewID: ReviewID) async -> Bool { false }
 }
 
 /// Keeps permission prompting at the lifecycle boundary and lets settings invoke it
@@ -93,8 +98,14 @@ public actor DeduplicatingNotificationService: NotificationService, Notification
         return try await presenter.requestAuthorization()
     }
 
+    public func authorization() async -> NotificationAuthorization { await presenter.authorization() }
+
     public func notify(reviewID: ReviewID, generic: Bool) async throws {
         guard try await !deliveryStore.wasDelivered(reviewID: reviewID) else { return }
+        if await presenter.hasPendingOrDelivered(reviewID: reviewID) {
+            try await deliveryStore.markDelivered(reviewID: reviewID)
+            return
+        }
         let usePrivate = privatePreview && !generic
         let request = NotificationRequestData(
             reviewID: reviewID,
@@ -177,6 +188,13 @@ public final class SystemNotificationPresenter: NotificationPresenter, @unchecke
         try await center.add(notification)
     }
     public func setBadge(_ value: Int) async { try? await center.setBadgeCount(value) }
+    public func hasPendingOrDelivered(reviewID: ReviewID) async -> Bool {
+        let identifier = "review-\(reviewID.value)"
+        let pending = await center.pendingNotificationRequests()
+        if pending.contains(where: { $0.identifier == identifier }) { return true }
+        let delivered = await center.deliveredNotifications()
+        return delivered.contains(where: { $0.request.identifier == identifier })
+    }
 }
 #endif
 

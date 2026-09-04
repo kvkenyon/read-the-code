@@ -269,6 +269,7 @@ targets:
       - path: CLI/rtc/RTCCLI.swift
     dependencies:
       - target: RTCContracts
+      - target: RTCGit
       - target: RTCIngest
       - target: RTCIPC
   RTCTestSupport:
@@ -488,6 +489,7 @@ targets:
   RTCUITests:
     type: bundle.ui-testing
     platform: macOS
-    sources: []
+    sources:
+      - UITests/RTCUITests
     dependencies:
       - target: ReadTheCode

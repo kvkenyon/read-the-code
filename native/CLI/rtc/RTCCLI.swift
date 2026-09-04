@@ -1,5 +1,6 @@
 import Foundation
 import RTCContracts
+import RTCGit
 import RTCIngest
 import RTCIPC
 
@@ -20,6 +21,7 @@ public enum RTCCommand: Equatable, Sendable {
 public struct RTCCLIParser: Sendable {
     public init() {}
     public func parse(_ args: [String]) throws -> RTCCommand {
+        guard args.count <= 64, args.reduce(0, { $0 + $1.utf8.count }) <= 64 * 1_024 else { throw RTCCLIError.usage("command exceeds argument limits") }
         guard let command = args.first else { return .help }
         var p = Array(args.dropFirst())
         func flag(_ name: String) -> Bool { if let i = p.firstIndex(of: name) { p.remove(at: i); return true }; return false }
@@ -28,15 +30,22 @@ public struct RTCCLIParser: Sendable {
             guard i + 1 < p.count, !p[i + 1].hasPrefix("--") else { throw RTCCLIError.usage("missing value for \(name)") }
             let result = p[i + 1]; p.removeSubrange(i...(i + 1)); return result
         }
+        func done(_ value: RTCCommand) throws -> RTCCommand {
+            guard p.isEmpty else { throw RTCCLIError.usage("unsupported argument \(p[0])") }
+            return value
+        }
         let json = flag("--json")
         switch command {
         case "submit":
             guard let repo = try value("--repo"), let base = try value("--base"), let head = try value("--head") else { throw RTCCLIError.usage("submit requires --repo, --base, and --head") }
             let metadata = try value("--metadata", required: false).flatMap { $0.data(using: .utf8) }
             let tour = try value("--tour", required: false).flatMap { $0.data(using: .utf8) }
-            return .submit(repo: repo, base: base, head: head, metadata: metadata, tour: tour, wakeFile: try value("--wake-file", required: false), notify: !flag("--no-notify"), json: json)
-        case "status": return .status(review: try positional(&p), json: json)
-        case "poll": return .poll(review: try positional(&p), after: try integer(value("--after")), timeoutMilliseconds: try duration(value("--timeout", required: false) ?? "2m"), full: flag("--full"), json: json, conversation: false)
+            let wakeFile = try value("--wake-file", required: false), notify = !flag("--no-notify")
+            return try done(.submit(repo: repo, base: base, head: head, metadata: metadata, tour: tour, wakeFile: wakeFile, notify: notify, json: json))
+        case "status": let review = try positional(&p); return try done(.status(review: review, json: json))
+        case "poll":
+            let review = try positional(&p), after = try integer(value("--after")), timeout = try duration(value("--timeout", required: false) ?? "2m"), full = flag("--full")
+            return try done(.poll(review: review, after: after, timeoutMilliseconds: timeout, full: full, json: json, conversation: false))
         case "conversation":
             let sub = try positional(&p), review = try positional(&p)
             if sub == "poll" { return .poll(review: review, after: try integer(value("--after")), timeoutMilliseconds: try duration(value("--timeout", required: false) ?? "2m"), full: flag("--full"), json: json, conversation: true) }
@@ -47,7 +56,7 @@ public struct RTCCLIParser: Sendable {
             guard let file = try value("--file") else { throw RTCCLIError.usage("tour attach requires --file") }
             return .attachTour(review: try positional(&p), file: file, json: json)
         case "export": return .export(review: try positional(&p), diagnostic: flag("--diagnostic"), full: flag("--full"), json: json)
-        case "close": return .close(review: try positional(&p), json: json)
+        case "close": let review = try positional(&p); return try done(.close(review: review, json: json))
         case "install-skill": return .installSkill(scope: try value("--scope", required: false), json: json)
         case "help", "--help", "-h": return .help
         default: throw RTCCLIError.usage("unknown command \(command)")
@@ -115,46 +124,53 @@ public struct RTCCLIExecutor: Sendable {
 
     public func run(_ command: RTCCommand) async throws -> String {
         switch command {
-        case let .submit(repo, base, head, metadata, tour, _, notify, _):
-            if let tour, tour.count > IPCConstants.maxTourBytes {
-                throw RTCCLIError.usage("tour exceeds the 1 MiB limit")
-            }
+        case let .submit(repo, base, head, metadata, tour, wakeFile, notify, _):
+            guard tour == nil, wakeFile == nil else { throw RTCCLIError.usage("--tour and --wake-file are not available in this build") }
             let title = try Self.metadataTitle(metadata)
+            let resolved = try await ExactGitEngine().resolveSubmission(repositoryPath: repo, base: base, head: head)
             let submission = ReviewSubmission(
-                repositoryPath: repo,
-                base: SubmittedRef(label: base, expectedSHA: Self.fullSHA(base)),
-                head: SubmittedRef(label: head, expectedSHA: Self.fullSHA(head)),
+                repositoryPath: resolved.revision.repositoryPath,
+                repositoryIdentity: resolved.repositoryIdentity,
+                base: SubmittedRef(label: base, expectedSHA: resolved.revision.baseSHA),
+                head: SubmittedRef(label: head, expectedSHA: resolved.revision.headSHA),
                 title: title,
                 notify: notify
             )
             return try await request(operation: "submitReview", body: RTCCanonicalJSON.encode(submission), durable: true)
         case let .status(review, _):
             return try await lookup(operation: "status", review: review)
-        case let .poll(review, after, _, _, _, conversation):
+        case let .poll(review, after, timeout, full, _, conversation):
             guard !conversation else { throw RTCCLIError.usage("conversation polling is not available") }
-            return try await lookup(operation: "pollReviewEvents", review: review, after: after)
+            return try await lookup(operation: "pollReviewEvents", review: review, after: after, timeout: timeout, full: full)
         case let .close(review, _):
             return try await lookup(operation: "closeReview", review: review)
         case .help:
-            return "rtc submit | status | poll | conversation | tour attach | export | close | install-skill\n"
+            return "rtc submit | status | poll | close\n"
         default:
             throw RTCCLIError.usage("operation is not available in this build")
         }
     }
 
-    private func lookup(operation: String, review: String, after: Int? = nil) async throws -> String {
+    private func lookup(operation: String, review: String, after: Int? = nil, timeout: Int? = nil, full: Bool = false) async throws -> String {
         let id = try ReviewID(review)
         return try await request(
             operation: operation,
-            body: RTCCanonicalJSON.encode(ReviewLookup(reviewID: id, after: after)),
+            body: RTCCanonicalJSON.encode(ReviewLookup(reviewID: id, after: after, timeoutMilliseconds: timeout, full: full)),
             durable: false
         )
     }
 
     private func request(operation: String, body: Data, durable: Bool) async throws -> String {
-        let capability: String
-        do { capability = try paths.prepare(createCapability: false) }
-        catch { throw RTCCLIError.remote(IPCWireError(code: "APP_UNAVAILABLE", message: "Read the Code is not installed", retryable: true)) }
+        var capability = try? paths.prepare(createCapability: false)
+        if capability == nil {
+            _ = await activator.activate()
+            let deadline = ContinuousClock.now.advanced(by: retryDuration)
+            while capability == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(150))
+                capability = try? paths.prepare(createCapability: false)
+            }
+        }
+        guard let capability else { throw RTCCLIError.remote(IPCWireError(code: "APP_UNAVAILABLE", message: "Read the Code is not installed", retryable: true)) }
         let envelope = IPCEnvelope(operation: operation, capability: capability, body: body)
         let client = IPCClient(socketPath: paths.socket.path)
         if let response = try? client.send(envelope, timeout: 0.5) { return try decode(response) }
@@ -179,10 +195,6 @@ public struct RTCCLIExecutor: Sendable {
     private func decode(_ response: IPCEnvelopeResponse) throws -> String {
         guard response.ok else { throw RTCCLIError.remote(response.error ?? IPCWireError(code: "INTERNAL_ERROR", message: "The operation failed")) }
         return String(data: response.body ?? Data(), encoding: .utf8) ?? "{}"
-    }
-
-    private static func fullSHA(_ value: String) -> String? {
-        value.count == 40 && value.allSatisfy(\.isHexDigit) ? value.lowercased() : nil
     }
 
     private static func metadataTitle(_ data: Data?) throws -> String {

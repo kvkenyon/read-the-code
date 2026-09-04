@@ -1,10 +1,10 @@
 import Foundation
 import RTCContracts
 import RTCGit
-import RTCStore
 
 public protocol IngestGitService: ExactGitService {
-    func resolveRevision(repositoryPath: String, base: String, head: String) async throws -> RevisionIdentity
+    func resolveSubmission(repositoryPath: String, base: String, head: String) async throws -> ExactGitEngine.ResolvedSubmission
+    func materialize(_ revision: RevisionIdentity, repositoryIdentity: SHA256Digest?) async throws -> ReviewManifest
 }
 
 extension ExactGitEngine: IngestGitService {}
@@ -12,115 +12,76 @@ extension ExactGitEngine: IngestGitService {}
 public actor SubmissionCoordinator {
     private let git: any IngestGitService
     private let records: SQLiteIngestRepository
-    private let reviews: any ReviewRepository
-    private let jobs: JobQueue
     private let notifications: any NotificationService
+    private let owner: BoundedString
     private var draining = false
+    private var maintenanceStarted = false
 
-    public init(
-        git: any IngestGitService,
-        records: SQLiteIngestRepository,
-        reviews: any ReviewRepository,
-        jobs: JobQueue,
-        notifications: any NotificationService
-    ) {
+    public init(git: any IngestGitService, records: SQLiteIngestRepository, notifications: any NotificationService) {
         self.git = git
         self.records = records
-        self.reviews = reviews
-        self.jobs = jobs
         self.notifications = notifications
+        owner = try! BoundedString("ingest-\(UUID().uuidString)", maxCharacters: 64)
     }
 
     public func submit(_ submission: ReviewSubmission) async throws -> SubmissionReceipt {
         try validate(submission)
-        let revision = try await git.resolveRevision(
-            repositoryPath: submission.repositoryPath,
-            base: submission.base.label,
-            head: submission.head.label
-        )
-        guard matches(submission.base.expectedSHA, revision.baseSHA),
-              matches(submission.head.expectedSHA, revision.headSHA)
-        else { throw GitEngineError.invalidRef }
-
-        let (record, disposition, superseded) = try await records.accept(submission, revision: revision)
-        if try await reviews.review(id: record.reviewID) == nil {
-            try await reviews.save(manifest(for: record, status: record.status))
-        }
-        if let superseded, let old = try await reviews.review(id: superseded) {
-            try await reviews.save(copy(old, status: .superseded, stale: old.stale))
-        }
-        try await jobs.enqueue(JobRecord(
-            id: UUID(), kind: .materialize, reviewID: record.reviewID, state: .queued,
-            attempt: 0, availableAt: Date()
-        ))
-        if record.status == .failed || record.status == .materializing {
-            try await jobs.requeue(reviewID: record.reviewID, kind: .materialize)
-            try await records.save(record.updating(
-                status: .accepted,
-                errorCode: .some(nil),
-                errorMessage: .some(nil)
-            ))
-        }
+        let revision = try RevisionIdentity(repositoryPath: submission.repositoryPath, baseSHA: submission.base.expectedSHA, headSHA: submission.head.expectedSHA)
+        guard revision.repositoryPath == submission.repositoryPath,
+              URL(fileURLWithPath: submission.repositoryPath).isFileURL,
+              submission.repositoryPath.hasPrefix("/") else { throw IngestError.invalidSubmission }
+        let (record, disposition, _) = try await records.accept(submission, revision: revision)
         scheduleDrain()
-        return SubmissionReceipt(reviewID: record.reviewID, revision: revision, disposition: disposition)
+        return SubmissionReceipt(reviewID: record.reviewID, revision: record.revision, disposition: disposition)
     }
 
     public func resumeOutstanding() async throws {
-        try await jobs.reclaimExpired()
-        for record in try await records.reviews() {
-            if record.status == .accepted || record.status == .materializing {
-                try await enqueue(kind: .materialize, reviewID: record.reviewID)
-                try await jobs.requeue(reviewID: record.reviewID, kind: .materialize)
-            } else if record.status == .ready && record.notify {
-                try await enqueue(kind: .notification, reviewID: record.reviewID)
-                try await jobs.requeue(reviewID: record.reviewID, kind: .notification)
-            }
-        }
+        try await records.reconcile()
         scheduleDrain()
+        startMaintenance()
     }
 
-    public func retry(_ id: ReviewID) async throws {
-        guard let record = try await records.review(id), record.status == .failed else { throw IngestError.invalidTransition }
-        try await records.save(record.updating(
-            status: .accepted,
-            errorCode: .some(nil),
-            errorMessage: .some(nil)
-        ))
-        try await jobs.requeue(reviewID: id, kind: .materialize)
-        scheduleDrain()
-    }
-
-    public func close(_ id: ReviewID) async throws -> ReviewStatusResponse {
-        guard let record = try await records.review(id) else { throw IngestError.notFound }
-        guard record.status != .superseded else { throw IngestError.invalidTransition }
-        let closed = record.updating(status: .closed)
-        try await records.save(closed)
-        if let review = try await reviews.review(id: id) {
-            try await reviews.save(copy(review, status: .closed, stale: review.stale))
-        }
-        return ReviewStatusResponse(record: closed)
-    }
+    public func retry(_ id: ReviewID) async throws { try await records.retry(id); scheduleDrain() }
+    public func close(_ id: ReviewID) async throws -> ReviewStatusResponse { ReviewStatusResponse(record: try await records.close(id)) }
+    public func markRead(_ id: ReviewID) async throws { try await records.markRead(id) }
 
     public func status(_ id: ReviewID) async throws -> ReviewStatusResponse {
         guard let record = try await records.review(id) else { throw IngestError.notFound }
         return ReviewStatusResponse(record: record)
     }
 
-    public func markRead(_ id: ReviewID) async throws {
-        guard let record = try await records.review(id) else { throw IngestError.notFound }
-        if record.unread { try await records.save(record.updating(unread: false)) }
+    public func poll(_ lookup: ReviewLookup) async throws -> ReviewPollResponse {
+        guard let current = try await records.review(lookup.reviewID) else { throw IngestError.notFound }
+        let after = lookup.after ?? 0
+        guard after >= 0, after <= current.changeSequence else { throw IngestError.invalidSubmission }
+        if let response = try await pollResult(lookup, after: after) { return response }
+        let timeout = min(max(lookup.timeoutMilliseconds ?? 0, 0), 120_000)
+        guard timeout > 0 else { return ReviewPollResponse(reviewID: lookup.reviewID, cursor: after, timedOut: true, changes: []) }
+        let stream = await records.observe(lookup.reviewID)
+        if let response = try await pollResult(lookup, after: after) { return response }
+        return try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask { var iterator = stream.makeAsyncIterator(); return await iterator.next() != nil }
+            group.addTask { try await Task.sleep(for: .milliseconds(timeout)); return false }
+            let changed = try await group.next() ?? false
+            group.cancelAll()
+            if changed, let response = try await self.pollResult(lookup, after: after) { return response }
+            return ReviewPollResponse(reviewID: lookup.reviewID, cursor: after, timedOut: true, changes: [])
+        }
     }
 
-    public func refreshStaleness() async throws {
-        for record in try await records.reviews() where record.status != .superseded && record.status != .closed {
-            let current = try? await git.resolveRevision(
-                repositoryPath: record.revision.repositoryPath,
-                base: record.baseRef,
-                head: record.headRef
-            )
-            guard current?.headSHA != record.revision.headSHA, !record.stale else { continue }
-            try await records.save(record.updating(stale: true))
-            try await reviews.markStale(record.reviewID)
+    public func refreshStaleness(limit: Int = 8) async throws {
+        for record in try await records.reviews(limit: max(0, min(limit, 64))) where record.status != .superseded && record.status != .closed {
+            do {
+                let resolved = try await git.resolveSubmission(repositoryPath: record.revision.repositoryPath, base: record.baseRef, head: record.headRef)
+                guard resolved.repositoryIdentity == record.repositoryIdentity else {
+                    try await records.recordRefreshError(record.reviewID, code: "REPOSITORY_CHANGED", message: "Repository identity changed; staleness will be retried.")
+                    continue
+                }
+                if resolved.revision != record.revision { try await records.markStale(record.reviewID) }
+                else { try await records.clearRefreshError(record.reviewID) }
+            } catch {
+                try await records.recordRefreshError(record.reviewID, code: "REFRESH_UNAVAILABLE", message: "Submitted refs are temporarily unavailable; staleness will be retried.")
+            }
         }
     }
 
@@ -129,135 +90,83 @@ public actor SubmissionCoordinator {
         await drain()
     }
 
-    private func scheduleDrain() {
-        Task { await self.drain() }
+    private func pollResult(_ lookup: ReviewLookup, after: Int) async throws -> ReviewPollResponse? {
+        let changes = try await records.changes(reviewID: lookup.reviewID, after: after, full: lookup.full)
+        guard let cursor = changes.last?.cursor else { return nil }
+        return ReviewPollResponse(reviewID: lookup.reviewID, cursor: cursor, timedOut: false, changes: changes)
+    }
+
+    private func scheduleDrain(after delay: Duration? = nil) {
+        Task {
+            if let delay { try? await Task.sleep(for: delay) }
+            await self.drain()
+        }
+    }
+
+    private func startMaintenance() {
+        guard !maintenanceStarted else { return }
+        maintenanceStarted = true
+        Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                await self.drain()
+                do { try await self.refreshStaleness() }
+                catch {
+                    do { try await self.records.recordRuntimeFailure(code: "REFRESH_FAILED", message: "Periodic staleness refresh failed.") }
+                    catch { /* The next maintenance pass retries store access. */ }
+                }
+            }
+        }
     }
 
     private func drain() async {
         guard !draining else { return }
         draining = true
         defer { draining = false }
-        let owner: BoundedString = "ingest-worker"
-        while let leased = try? await jobs.leaseNext(owner: owner, now: Date(), kind: .materialize) {
-            let (job, _) = leased
-            guard let record = try? await records.review(job.reviewID) else {
-                try? await jobs.complete(job.id, state: .failed)
-                continue
+        do {
+            while let lease = try await records.leaseMaterialization(owner: owner) {
+                guard let record = try await records.review(lease.reviewID) else { throw IngestError.notFound }
+                do {
+                    let evidence = try await git.materialize(record.revision, repositoryIdentity: record.repositoryIdentity)
+                    try await records.completeReady(lease, evidence: evidence)
+                } catch {
+                    let failure = durableFailure(error)
+                    try await records.completeFailure(lease, code: failure.code, message: failure.message)
+                }
             }
-            guard record.status != .superseded && record.status != .closed else {
-                try? await jobs.complete(job.id, state: .cancelled)
-                continue
+            while let lease = try await records.claimNotification(owner: owner) {
+                do {
+                    try await notifications.notify(reviewID: lease.reviewID, generic: true)
+                    try await records.completeNotification(lease)
+                } catch {
+                    try await records.retryNotification(lease)
+                    scheduleDrain(after: .seconds(30))
+                    break
+                }
             }
-            let materializing = record.updating(status: .materializing)
-            try? await records.save(materializing)
-            try? await reviews.save(manifest(for: materializing, status: .materializing))
-            do {
-                let evidence = try await git.materialize(record.revision)
-                let ready = materializing.updating(
-                    status: .ready,
-                    unread: true,
-                    errorCode: .some(nil),
-                    errorMessage: .some(nil)
-                )
-                try await reviews.save(copy(evidence, status: .ready, stale: ready.stale))
-                try await records.save(ready)
-                try await jobs.complete(job.id, state: .succeeded)
-                if ready.notify { try await enqueue(kind: .notification, reviewID: ready.reviewID) }
-            } catch {
-                let failure = durableFailure(error)
-                let failed = materializing.updating(
-                    status: .failed,
-                    errorCode: .some(failure.code),
-                    errorMessage: .some(failure.message)
-                )
-                try? await records.save(failed)
-                try? await reviews.save(manifest(for: failed, status: .failed))
-                try? await jobs.complete(job.id, state: .failed)
-            }
-        }
-        while let leased = try? await jobs.leaseNext(owner: owner, now: Date(), kind: .notification) {
-            let (job, _) = leased
-            guard let record = try? await records.review(job.reviewID), record.notify, record.status == .ready else {
-                try? await jobs.complete(job.id, state: .cancelled)
-                continue
-            }
-            do {
-                try await notifications.notify(reviewID: record.reviewID, generic: true)
-                try await jobs.complete(job.id, state: .succeeded)
-            } catch {
-                try? await jobs.requeue(
-                    reviewID: record.reviewID,
-                    kind: .notification,
-                    now: Date().addingTimeInterval(30)
-                )
-                scheduleDrain(after: .seconds(30))
-                break
-            }
-        }
-    }
-
-    private func enqueue(kind: JobKind, reviewID: ReviewID) async throws {
-        try await jobs.enqueue(JobRecord(
-            id: UUID(), kind: kind, reviewID: reviewID, state: .queued,
-            attempt: 0, availableAt: Date()
-        ))
-    }
-
-    private func scheduleDrain(after delay: Duration) {
-        Task {
-            try? await Task.sleep(for: delay)
-            await self.drain()
+        } catch {
+            do { try await records.recordRuntimeFailure(code: "WORKER_FAILED", message: "Background processing will be retried.") }
+            catch { /* SQLite failure remains observable to the next resume/start attempt. */ }
         }
     }
 
     private func validate(_ submission: ReviewSubmission) throws {
         guard submission.schemaVersion == RTCConstants.schemaVersion,
-              !submission.repositoryPath.isEmpty,
-              submission.repositoryPath.utf8.count <= RTCConstants.maxPathBytes,
+              !submission.repositoryPath.isEmpty, submission.repositoryPath.utf8.count <= RTCConstants.maxPathBytes,
               !submission.repositoryPath.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
               !submission.base.label.isEmpty, !submission.head.label.isEmpty,
+              submission.base.label.utf8.count <= 1024, submission.head.label.utf8.count <= 1024,
+              submission.base.expectedSHA.count == 40, submission.head.expectedSHA.count == 40,
+              submission.base.expectedSHA.allSatisfy(\.isHexDigit), submission.head.expectedSHA.allSatisfy(\.isHexDigit),
               submission.title.utf8.count <= 512,
-              (try? BoundedString(submission.title, maxCharacters: 512)) != nil
-        else { throw IngestError.invalidSubmission }
-    }
-
-    private func matches(_ expected: String?, _ actual: String) -> Bool {
-        guard let expected else { return true }
-        return expected.lowercased() == actual.lowercased()
-    }
-
-    private func manifest(for record: IngestReviewRecord, status: ReviewStatus) -> ReviewManifest {
-        ReviewManifest(
-            id: record.reviewID,
-            revision: record.revision,
-            createdAt: record.createdAt,
-            updatedAt: record.updatedAt,
-            status: status,
-            stale: record.stale,
-            summary: ReviewSummary(files: 0, additions: 0, deletions: 0),
-            files: []
-        )
-    }
-
-    private func copy(_ review: ReviewManifest, status: ReviewStatus, stale: Bool) -> ReviewManifest {
-        ReviewManifest(
-            id: review.id,
-            revision: review.revision,
-            createdAt: review.createdAt,
-            updatedAt: Date(),
-            status: status,
-            stale: stale,
-            summary: review.summary,
-            files: review.files
-        )
+              (try? BoundedString(submission.title, maxCharacters: 512)) != nil else { throw IngestError.invalidSubmission }
     }
 
     private func durableFailure(_ error: Error) -> (code: String, message: String) {
         switch error {
-        case GitEngineError.invalidRepository: return ("INVALID_REVISION", "Repository is unavailable or invalid.")
+        case GitEngineError.invalidRepository: return ("INVALID_REVISION", "Repository is unavailable, invalid, or has been replaced.")
         case GitEngineError.invalidRef: return ("INVALID_REF", "A submitted revision cannot be resolved.")
-        case GitEngineError.tooManyFiles, GitEngineError.patchLimit, GitEngineError.outputLimit:
-            return ("LIMIT_EXCEEDED", "The committed comparison exceeds review limits.")
+        case GitEngineError.tooManyFiles, GitEngineError.patchLimit, GitEngineError.outputLimit: return ("LIMIT_EXCEEDED", "The committed comparison exceeds review limits.")
         case GitEngineError.timedOut: return ("GIT_TIMEOUT", "Git materialization timed out.")
         case GitEngineError.cancelled: return ("GIT_CANCELLED", "Git materialization was cancelled.")
         default: return ("INTERNAL_ERROR", "The committed comparison could not be materialized.")

@@ -30,7 +30,14 @@ struct ReadTheCodeApp: App {
                         }
                         .frame(minWidth: 520, minHeight: 360)
                     case .inbox:
-                        InboxView(model: inbox)
+                        VStack(spacing: 0) {
+                            if model.notificationAuthorization == .notDetermined {
+                                Button("Enable Ready Notifications") { Task { await model.enableNotifications() } }
+                                    .padding(8)
+                                    .accessibilityHint("Requests macOS notification permission")
+                            }
+                            InboxView(model: inbox)
+                        }
                     }
                 } else if let error = model.errorMessage {
                     ContentUnavailableView("Inbox unavailable", systemImage: "exclamationmark.triangle", description: Text(error))
@@ -48,6 +55,7 @@ final class NativeApplicationModel: ObservableObject {
     @Published var inbox: InboxModel?
     @Published var route: ActivationRoute = .inbox
     @Published var errorMessage: String?
+    @Published var notificationAuthorization: NotificationAuthorization = .notDetermined
 
     private var runtime: RTCIngestRuntime?
     private var lifecycle: LifecycleCoordinator?
@@ -79,10 +87,31 @@ final class NativeApplicationModel: ObservableObject {
             self.lifecycle = lifecycle
             self.runtime = runtime
             try await runtime.start()
+            if ProcessInfo.processInfo.arguments.contains("--uitest-inbox-fixture") { try await seedInboxFixture(runtime) }
+            notificationAuthorization = await runtime.notificationService.authorization()
             await inbox?.refresh()
         } catch {
             errorMessage = "Private review state could not be opened."
         }
+    }
+
+    func enableNotifications() async {
+        guard let runtime else { return }
+        do { notificationAuthorization = try await runtime.notificationService.requestPermissionIfNeeded() }
+        catch { errorMessage = "Notification permission could not be requested." }
+    }
+
+    private func seedInboxFixture(_ runtime: RTCIngestRuntime) async throws {
+        let base = String(repeating: "a", count: 40), head = String(repeating: "b", count: 40)
+        let revision = try RevisionIdentity(repositoryPath: "/tmp/rtc-ui-fixture", baseSHA: base, headSHA: head)
+        let submission = ReviewSubmission(
+            idempotencyKey: UUID(uuidString: "00000000-0000-0000-0000-000000000201")!,
+            repositoryPath: revision.repositoryPath,
+            repositoryIdentity: SHA256Digest(data: Data("rtc-ui-fixture".utf8)),
+            base: SubmittedRef(label: "base", expectedSHA: base), head: SubmittedRef(label: "head", expectedSHA: head),
+            title: "Exact revision fixture", notify: false
+        )
+        _ = try await runtime.records.accept(submission, revision: revision)
     }
 }
 
