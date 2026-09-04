@@ -11,6 +11,8 @@ let libraryTargets = [
     "RTCDiffCanvas",
     "RTCDiagram",
     "RTCTour",
+    "RTCTourIntegration",
+    "TourWorkspace",
     "RTCModelAdapters",
     "RTCAgentChat",
     "RTCReview",
@@ -51,7 +53,25 @@ let package = Package(
         .target(name: "RTCSyntax", dependencies: ["RTCContracts"]),
         .target(name: "RTCDiffCanvas", dependencies: ["RTCContracts"]),
         .target(name: "RTCDiagram", dependencies: ["RTCContracts"]),
-        .target(name: "RTCTour", dependencies: ["RTCContracts"]),
+        .target(name: "RTCTour", dependencies: ["RTCContracts", "RTCDiagram"]),
+        .target(
+            name: "RTCTourIntegration",
+            dependencies: [
+                "RTCContracts",
+                "RTCDiagram",
+                "RTCGit",
+                "RTCModelAdapters",
+                "RTCStore",
+                "RTCSyntax",
+                "RTCTour",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
+        .target(
+            name: "TourWorkspace",
+            dependencies: ["RTCContracts", "RTCDesign", "RTCDiagram", "RTCTourIntegration"],
+            path: "Features/TourWorkspace"
+        ),
         .target(name: "RTCModelAdapters", dependencies: ["RTCContracts"]),
         .target(name: "RTCAgentChat", dependencies: ["RTCContracts"]),
         .target(name: "RTCReview", dependencies: ["RTCContracts", "RTCDomain"]),
@@ -111,6 +131,7 @@ let package = Package(
         .testTarget(name: "RTCStoreTests", dependencies: ["RTCStore"]),
         .testTarget(name: "RTCWorkspaceShellTests", dependencies: ["RTCWorkspaceShell"]),
         .testTarget(name: "RTCSettingsTests", dependencies: ["RTCSettings"]),
+        .testTarget(name: "TourWorkspaceUITests", dependencies: []),
         // The landed smoke modules intentionally own their entry points. The native gate
         // runs every one after building the graph.
         .executableTarget(name: "RTCCLITests", dependencies: ["RTCCLI"], path: "Tests/RTCCLITests"),
@@ -127,5 +148,13 @@ let package = Package(
         .executableTarget(name: "RTCReviewTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview"], path: "Tests/RTCReviewTests"),
         .executableTarget(name: "RTCSyntaxTests", dependencies: ["RTCContracts", "RTCSyntax"], path: "Tests/RTCSyntaxTests"),
         .executableTarget(name: "RTCTourTests", dependencies: ["RTCContracts", "RTCTour"], path: "Tests/RTCTourTests"),
+        .executableTarget(
+            name: "TourWorkspaceFeatureTests",
+            dependencies: [
+                "RTCContracts", "RTCDiagram", "RTCModelAdapters", "RTCStore", "RTCSyntax",
+                "RTCTour", "RTCTourIntegration", "TourWorkspace",
+            ],
+            path: "Tests/TourWorkspaceFeatureTests"
+        ),
     ]
 )

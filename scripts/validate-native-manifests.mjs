@@ -26,7 +26,18 @@ const expectedDependencies = {
   RTCSyntax: ['RTCContracts'],
   RTCDiffCanvas: ['RTCContracts'],
   RTCDiagram: ['RTCContracts'],
-  RTCTour: ['RTCContracts'],
+  RTCTour: ['RTCContracts', 'RTCDiagram'],
+  RTCTourIntegration: [
+    'GRDB',
+    'RTCContracts',
+    'RTCDiagram',
+    'RTCGit',
+    'RTCModelAdapters',
+    'RTCStore',
+    'RTCSyntax',
+    'RTCTour',
+  ],
+  TourWorkspace: ['RTCContracts', 'RTCDesign', 'RTCDiagram', 'RTCTourIntegration'],
   RTCModelAdapters: ['RTCContracts'],
   RTCAgentChat: ['RTCContracts'],
   RTCReview: ['RTCContracts', 'RTCDomain'],
@@ -53,6 +64,16 @@ const expectedDependencies = {
   RTCReviewTests: ['RTCContracts', 'RTCDomain', 'RTCReview'],
   RTCSyntaxTests: ['RTCContracts', 'RTCSyntax'],
   RTCTourTests: ['RTCContracts', 'RTCTour'],
+  TourWorkspaceFeatureTests: [
+    'RTCContracts',
+    'RTCDiagram',
+    'RTCModelAdapters',
+    'RTCStore',
+    'RTCSyntax',
+    'RTCTour',
+    'RTCTourIntegration',
+    'TourWorkspace',
+  ],
 };
 
 function fail(message) {
@@ -164,6 +185,7 @@ for (const [directory, packageType, xcodeType] of [
   ['RTCReviewTests', 'executable', 'tool'],
   ['RTCSyntaxTests', 'executable', 'tool'],
   ['RTCTourTests', 'executable', 'tool'],
+  ['TourWorkspaceFeatureTests', 'executable', 'tool'],
 ]) {
   const source = fs
     .readdirSync(path.join(repositoryRoot, 'native/Tests', directory))

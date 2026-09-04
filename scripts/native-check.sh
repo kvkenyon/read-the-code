@@ -20,7 +20,8 @@ for test_target in \
     RTCLifecycleTests \
     RTCReviewTests \
     RTCSyntaxTests \
-    RTCTourTests
+    RTCTourTests \
+    TourWorkspaceFeatureTests
 do
     swift run --package-path native "$test_target"
 done
