@@ -8,11 +8,17 @@ public struct CanvasSnapshot: Sendable {
     public let files: [CanvasFile]
     public let selected: CanvasSelection?
     public let revision: RevisionIdentity
+    public let threads: [CanvasInlineThread]
+    public let composer: CanvasSelection?
+    public let contentVersion: Int
 
-    public init(revision: RevisionIdentity, files: [CanvasFile], selected: CanvasSelection? = nil) {
+    public init(revision: RevisionIdentity, files: [CanvasFile], selected: CanvasSelection? = nil, threads: [CanvasInlineThread] = [], composer: CanvasSelection? = nil, contentVersion: Int = 0) {
         self.revision = revision
         self.files = files
         self.selected = selected
+        self.threads = threads
+        self.composer = composer
+        self.contentVersion = contentVersion
     }
 }
 
@@ -46,7 +52,7 @@ public struct CanvasHunk: Sendable {
     }
 }
 
-public struct CanvasSelection: Hashable, Sendable {
+public struct CanvasSelection: Codable, Hashable, Sendable {
     public let path: String
     public let side: AnchorSide
     public let startLine: Int
@@ -58,6 +64,14 @@ public struct CanvasSelection: Hashable, Sendable {
         self.startLine = min(startLine, endLine)
         self.endLine = max(startLine, endLine)
     }
+}
+
+public struct CanvasInlineThread: Hashable, Sendable {
+    public let id: UUID
+    public let selection: CanvasSelection
+    public let state: String
+    public let body: String
+    public init(id: UUID, selection: CanvasSelection, state: String, body: String) { self.id=id; self.selection=selection; self.state=state; self.body=body }
 }
 
 public protocol SyntaxHighlighter: Sendable {
@@ -84,7 +98,8 @@ public enum CanvasItemID: Hashable, Sendable {
     case hunk(path: String, index: Int)
     case contextGap(path: String, hunk: Int, side: GapSide)
     case line(path: String, hunk: Int, index: Int)
-    case thread(path: String, hunk: Int, index: Int)
+    case thread(UUID)
+    case composer(path: String, hunk: Int, index: Int)
 }
 
 public enum GapSide: String, Hashable, Sendable { case before, after }
@@ -96,9 +111,22 @@ public struct CanvasNavigationEvent: Sendable {
     public init(selection: CanvasSelection) { self.selection = selection }
 }
 
-public protocol ReviewCanvasDelegate: AnyObject {
+@MainActor public protocol ReviewCanvasDelegate: AnyObject {
     func canvas(_ canvas: ReviewCanvasController, didSelect event: CanvasNavigationEvent)
     func canvas(_ canvas: ReviewCanvasController, didRequestCommentAt selection: CanvasSelection)
+    func canvas(_ canvas: ReviewCanvasController, didActivateThread id: UUID)
+    func canvasDidSaveComposer(_ canvas: ReviewCanvasController)
+    func canvasDidCancelComposer(_ canvas: ReviewCanvasController)
+    func canvas(_ canvas: ReviewCanvasController, didUpdateComposer body: String)
+    func canvas(_ canvas: ReviewCanvasController, didRequestThreadAction id: UUID)
+}
+
+public extension ReviewCanvasDelegate {
+    func canvas(_ canvas: ReviewCanvasController, didActivateThread id: UUID) {}
+    func canvasDidSaveComposer(_ canvas: ReviewCanvasController) {}
+    func canvasDidCancelComposer(_ canvas: ReviewCanvasController) {}
+    func canvas(_ canvas: ReviewCanvasController, didUpdateComposer body: String) {}
+    func canvas(_ canvas: ReviewCanvasController, didRequestThreadAction id: UUID) {}
 }
 
 /// A reusable AppKit bridge. The collection view owns only visible cells;
@@ -106,13 +134,20 @@ public protocol ReviewCanvasDelegate: AnyObject {
 @MainActor
 public final class ReviewCanvasController: NSViewController {
     public weak var delegate: ReviewCanvasDelegate?
+    public var syntaxHighlighter: (any SyntaxHighlighter)?
     public let collectionView: NSCollectionView
     private var snapshot: CanvasSnapshot?
     private var selected: CanvasSelection?
     private var restoreAnchor: CanvasSelection?
     private var appliedRevision: RevisionIdentity?
     private var appliedFiles: [CanvasFile] = []
+    private var appliedContentVersion: Int?
+    private var appliedThreads: [CanvasInlineThread] = []
+    private var appliedComposer: CanvasSelection?
     private lazy var dataSource = makeDataSource()
+    public private(set) var fullSnapshotApplicationCount = 0
+    public private(set) var enumeratedLineCount = 0
+    public private(set) var syntaxRequestCount = 0
 
     public init() {
         collectionView = ReviewCanvasCollectionView()
@@ -149,18 +184,33 @@ public final class ReviewCanvasController: NSViewController {
     public func apply(_ snapshot: CanvasSnapshot, animatingDifferences: Bool = false) {
         precondition(Thread.isMainThread)
         let incomingSelection = snapshot.selected ?? selected
-        guard appliedRevision != snapshot.revision || appliedFiles.map(\.artifact) != snapshot.files.map(\.artifact) || selected != incomingSelection else { return }
-        restoreAnchor = selected
+        let coreChanged = appliedRevision != snapshot.revision || appliedContentVersion != snapshot.contentVersion || appliedFiles.map(\.artifact.path) != snapshot.files.map(\.artifact.path)
+        let inlineChanged = appliedThreads != snapshot.threads || appliedComposer != snapshot.composer
+        let selectionChanged = selected != incomingSelection
+        guard coreChanged || inlineChanged || selectionChanged else { return }
+        restoreAnchor = incomingSelection
         self.snapshot = snapshot
         appliedRevision = snapshot.revision
         appliedFiles = snapshot.files
+        appliedContentVersion = snapshot.contentVersion
+        let previousThreads = appliedThreads
+        let previousComposer = appliedComposer
+        appliedThreads = snapshot.threads
+        appliedComposer = snapshot.composer
         if let incomingSelection = snapshot.selected { selected = incomingSelection }
+        if !coreChanged {
+            if inlineChanged { updateInlineItems(removing: previousThreads, previousComposer: previousComposer, adding: snapshot.threads, composer: snapshot.composer) }
+            if selectionChanged { reloadSelectionRows() }
+            return
+        }
         var diff = NSDiffableDataSourceSnapshot<CanvasSection, CanvasItemID>()
+        enumeratedLineCount = 0
         for file in snapshot.files {
             let section = CanvasSection.file(file.artifact.path)
             diff.appendSections([section])
             diff.appendItems(items(for: file), toSection: section)
         }
+        fullSnapshotApplicationCount += 1
         dataSource.apply(diff, animatingDifferences: animatingDifferences) { [weak self] in
             self?.restoreSelectionAndScroll()
         }
@@ -171,6 +221,19 @@ public final class ReviewCanvasController: NSViewController {
     public func restore(scrollPosition: CanvasSelection?) {
         restoreAnchor = scrollPosition
         restoreSelectionAndScroll()
+    }
+
+    public func navigate(to selection: CanvasSelection, focus: Bool = false) {
+        selected = selection; restoreAnchor = selection; restoreSelectionAndScroll()
+        if focus { view.window?.makeFirstResponder(collectionView) }
+        delegate?.canvas(self, didSelect: CanvasNavigationEvent(selection: selection))
+    }
+
+    public func navigate(toFile path: String, focus: Bool = false) {
+        guard let file = snapshot?.files.first(where: { $0.artifact.path == path }),
+              let line = file.hunks.flatMap(\.lines).first,
+              let number = line.newLine ?? line.oldLine else { return }
+        navigate(to: CanvasSelection(path: path, side: line.newLine == nil ? .old : .new, startLine: number, endLine: number), focus: focus)
     }
 
     public func copySelection() {
@@ -193,7 +256,12 @@ public final class ReviewCanvasController: NSViewController {
             result.append(.hunk(path: file.artifact.path, index: hunk.index))
             for (index, line) in hunk.lines.enumerated() {
                 result.append(.line(path: file.artifact.path, hunk: hunk.index, index: index))
-                if line.kind != .context { result.append(.thread(path: file.artifact.path, hunk: hunk.index, index: index)) }
+                enumeratedLineCount += 1
+                let side: AnchorSide = line.newLine == nil ? .old : .new
+                let number = line.newLine ?? line.oldLine
+                let anchored = snapshot?.threads.filter { $0.selection.path == file.artifact.path && $0.selection.side == side && $0.selection.endLine == number } ?? []
+                result.append(contentsOf: anchored.sorted { $0.id.uuidString < $1.id.uuidString }.map { .thread($0.id) })
+                if let composer = snapshot?.composer, composer.path == file.artifact.path, composer.side == side, composer.endLine == number { result.append(.composer(path: file.artifact.path, hunk: hunk.index, index: index)) }
             }
             if hunk.contextAfter > 0 { result.append(.contextGap(path: file.artifact.path, hunk: hunk.index, side: .after)) }
         }
@@ -204,8 +272,57 @@ public final class ReviewCanvasController: NSViewController {
         NSCollectionViewDiffableDataSource<CanvasSection, CanvasItemID>(collectionView: collectionView) { [weak self] collection, indexPath, item in
             guard let self else { return nil }
             let cell = collection.makeItem(withIdentifier: CanvasRowView.reuseIdentifier, for: indexPath) as! CanvasRowView
-            cell.represent(item: item, snapshot: self.snapshot, selected: self.selected)
+            cell.represent(item: item, snapshot: self.snapshot, selected: self.selected, action: { [weak self] action in self?.handle(action) })
+            if case let .line(path, hunkIndex, lineIndex) = item,
+               let line = self.snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == hunkIndex })?.lines[lineIndex],
+               let highlighter = self.syntaxHighlighter {
+                self.syntaxRequestCount += 1
+                Task { [weak cell] in
+                    let spans = await highlighter.spans(for: line, path: path)
+                    await MainActor.run { cell?.applySyntax(spans, for: item) }
+                }
+            }
             return cell
+        }
+    }
+
+    private func updateInlineItems(removing oldThreads: [CanvasInlineThread], previousComposer: CanvasSelection?, adding newThreads: [CanvasInlineThread], composer: CanvasSelection?) {
+        var diff = dataSource.snapshot()
+        let old = oldThreads.map { CanvasItemID.thread($0.id) } + (composerItem(for: previousComposer).map { [$0] } ?? [])
+        diff.deleteItems(old.filter { diff.indexOfItem($0) != nil })
+        for thread in newThreads.sorted(by: { $0.id.uuidString < $1.id.uuidString }) { insert(.thread(thread.id), after: thread.selection, into: &diff) }
+        if let composerItem = composerItem(for: composer), let composer { insert(composerItem, after: composer, into: &diff) }
+        dataSource.apply(diff, animatingDifferences: false) { [weak self] in self?.restoreSelectionAndScroll() }
+    }
+
+    private func composerItem(for selection: CanvasSelection?) -> CanvasItemID? {
+        guard let selection, let indexPath = indexPath(for: selection), let item = dataSource.itemIdentifier(for: indexPath), case let .line(path, hunk, index) = item else { return nil }
+        return .composer(path: path, hunk: hunk, index: index)
+    }
+
+    private func insert(_ item: CanvasItemID, after selection: CanvasSelection, into diff: inout NSDiffableDataSourceSnapshot<CanvasSection, CanvasItemID>) {
+        guard let anchor = lineItem(for: selection), diff.indexOfItem(anchor) != nil else { return }
+        let following = diff.itemIdentifiers.drop { $0 != anchor }.dropFirst().prefix { candidate in
+            if case .thread = candidate { return true }; if case .composer = candidate { return true }; return false
+        }
+        if let last = following.last { diff.insertItems([item], afterItem: last) } else { diff.insertItems([item], afterItem: anchor) }
+    }
+
+    private func lineItem(for selection: CanvasSelection) -> CanvasItemID? { indexPath(for: selection).flatMap { dataSource.itemIdentifier(for: $0) } }
+    private func reloadSelectionRows() {
+        var diff = dataSource.snapshot()
+        let visible = collectionView.indexPathsForVisibleItems().compactMap { dataSource.itemIdentifier(for: $0) }
+        diff.reloadItems(visible); dataSource.apply(diff, animatingDifferences: false)
+    }
+
+    fileprivate enum RowAction { case thread(UUID), threadAction(UUID), saveComposer, cancelComposer, updateComposer(String) }
+    private func handle(_ action: RowAction) {
+        switch action {
+        case let .thread(id): delegate?.canvas(self, didActivateThread: id)
+        case let .threadAction(id): delegate?.canvas(self, didRequestThreadAction: id)
+        case .saveComposer: delegate?.canvasDidSaveComposer(self)
+        case .cancelComposer: delegate?.canvasDidCancelComposer(self)
+        case let .updateComposer(body): delegate?.canvas(self, didUpdateComposer: body)
         }
     }
 
@@ -227,14 +344,14 @@ public final class ReviewCanvasController: NSViewController {
 
     private func indexPath(for selection: CanvasSelection) -> IndexPath? {
         guard let file = snapshot?.files.first(where: { $0.artifact.path == selection.path }) else { return nil }
-        guard let hunk = file.hunks.first(where: { hunk in hunk.lines.contains { $0.newLine == selection.startLine || $0.oldLine == selection.startLine } }) else { return nil }
-        guard let row = hunk.lines.firstIndex(where: { $0.newLine == selection.startLine || $0.oldLine == selection.startLine }) else { return nil }
+        guard let hunk = file.hunks.first(where: { hunk in hunk.lines.contains { (selection.side == .new ? $0.newLine : $0.oldLine) == selection.startLine } }) else { return nil }
+        guard let row = hunk.lines.firstIndex(where: { (selection.side == .new ? $0.newLine : $0.oldLine) == selection.startLine }) else { return nil }
         let item = CanvasItemID.line(path: selection.path, hunk: hunk.index, index: row)
         return dataSource.indexPath(for: item)
     }
 
     private func line(for selection: CanvasSelection) -> DiffLine? {
-        snapshot?.files.first(where: { $0.artifact.path == selection.path })?.hunks.flatMap(\.lines).first { $0.newLine == selection.startLine || $0.oldLine == selection.startLine }
+        snapshot?.files.first(where: { $0.artifact.path == selection.path })?.hunks.flatMap(\.lines).first { (selection.side == .new ? $0.newLine : $0.oldLine) == selection.startLine }
     }
 }
 
@@ -275,23 +392,82 @@ public final class ReviewCanvasRepresentable: NSViewRepresentable {
     public final class Coordinator { fileprivate var controller: ReviewCanvasController? }
 }
 
-final class CanvasRowView: NSCollectionViewItem {
+final class CanvasRowView: NSCollectionViewItem, NSTextFieldDelegate {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("CanvasRowView")
     private let label = NSTextField(labelWithString: "")
-    override func loadView() { view = NSView(); label.translatesAutoresizingMaskIntoConstraints = false; label.font = .monospacedSystemFont(ofSize: 12, weight: .regular); view.addSubview(label); NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16), label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16), label.topAnchor.constraint(equalTo: view.topAnchor, constant: 5), label.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -5)]) }
-    func represent(item: CanvasItemID, snapshot: CanvasSnapshot?, selected: CanvasSelection?) {
+    private var action: ((ReviewCanvasController.RowAction) -> Void)?
+    private var representedItem: CanvasItemID?
+    private var codePrefixCharacters = 0
+    override func loadView() { view = NSView(); label.translatesAutoresizingMaskIntoConstraints = false; label.font = .monospacedSystemFont(ofSize: 12, weight: .regular); label.maximumNumberOfLines = 0; view.addSubview(label); NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16), label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16), label.topAnchor.constraint(equalTo: view.topAnchor, constant: 5), label.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -5)]) }
+    override func prepareForReuse() { super.prepareForReuse(); view.subviews.filter { $0 !== label }.forEach { $0.removeFromSuperview() }; label.isHidden = false; view.layer?.backgroundColor = nil; action = nil; representedItem = nil; codePrefixCharacters = 0 }
+    fileprivate func represent(item: CanvasItemID, snapshot: CanvasSnapshot?, selected: CanvasSelection?, action: @escaping (ReviewCanvasController.RowAction) -> Void) {
+        prepareForReuse(); self.action = action; representedItem = item
         switch item {
         case let .hunk(path, index): label.stringValue = snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == index })?.header ?? ""
         case let .contextGap(_, _, side): label.stringValue = side == .before ? "⋯  context above" : "⋯  context below"
         case let .line(path, hunk, index):
             guard let line = snapshot?.files.first(where: { $0.artifact.path == path })?.hunks.first(where: { $0.index == hunk })?.lines[index] else { return }
-            label.stringValue = "\(line.oldLine.map(String.init) ?? "   ")  \(line.newLine.map(String.init) ?? "   ")  \(line.kind == .addition ? "+" : line.kind == .deletion ? "-" : " ") \(line.text)"
+            let prefix = "\(line.oldLine.map(String.init) ?? "   ")  \(line.newLine.map(String.init) ?? "   ")  \(line.kind == .addition ? "+" : line.kind == .deletion ? "-" : " ") "
+            codePrefixCharacters = (prefix as NSString).length; label.stringValue = prefix + line.text
             label.textColor = line.kind == .addition ? .systemGreen : line.kind == .deletion ? .systemRed : .labelColor
-            label.setAccessibilityLabel("\(line.kind.rawValue) line \(line.newLine ?? line.oldLine ?? 0): \(line.text)")
-        case .thread: label.stringValue = "  ↳  Add inline comment"
+            let threadCount=snapshot?.threads.filter { $0.selection.path == path && $0.selection.endLine == (line.newLine ?? line.oldLine) }.count ?? 0
+            label.setAccessibilityLabel("\(line.kind.rawValue) line \(line.newLine ?? line.oldLine ?? 0), \(threadCount) comments: \(line.text)")
+            let side: AnchorSide = line.newLine == nil ? .old : .new
+            let number = line.newLine ?? line.oldLine ?? 0
+            let isSelected = selected.map { $0.path == path && $0.side == side && $0.startLine...$0.endLine ~= number } ?? false
+            view.wantsLayer = true; view.layer?.backgroundColor = isSelected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.18).cgColor : nil
+            view.setAccessibilitySelected(isSelected)
+        case let .thread(id):
+            guard let thread = snapshot?.threads.first(where: { $0.id == id }) else { return }
+            label.isHidden = true; installThread(thread)
+        case .composer:
+            label.isHidden = true; installComposer()
         case .file: label.stringValue = ""
         }
     }
+    fileprivate func applySyntax(_ spans: [SyntaxSpan], for item: CanvasItemID) {
+        guard representedItem == item, !label.stringValue.isEmpty else { return }
+        let attributed=NSMutableAttributedString(string: label.stringValue, attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: label.textColor ?? NSColor.labelColor])
+        let length=attributed.length
+        for span in spans {
+            let location=codePrefixCharacters + span.range.lowerBound, count=span.range.count
+            guard location >= codePrefixCharacters, count >= 0, location + count <= length else { continue }
+            let color: NSColor
+            switch span.token { case "keyword": color = .systemPink; case "string": color = .systemPurple; case "comment": color = .secondaryLabelColor; case "number": color = .systemBlue; default: color = label.textColor ?? .labelColor }
+            attributed.addAttribute(.foregroundColor, value: color, range: NSRange(location: location, length: count))
+        }
+        label.attributedStringValue=attributed
+    }
+
+    private func installThread(_ thread: CanvasInlineThread) {
+        let title = NSTextField(labelWithString: "\(thread.state.capitalized) thread  ·  Line \(thread.selection.startLine)")
+        title.font = .systemFont(ofSize: 12, weight: .semibold)
+        let body = NSTextField(wrappingLabelWithString: thread.body); body.font = .systemFont(ofSize: 12)
+        let open = NSButton(title: "Show in comments", target: self, action: #selector(showThread)); open.tag = 0
+        let state = NSButton(title: thread.state == "resolved" ? "Reopen" : thread.state == "open" ? "Resolve" : "Draft", target: self, action: #selector(threadAction)); state.isEnabled = thread.state == "open" || thread.state == "resolved"
+        let row = NSStackView(views: [open, state]); row.orientation = .horizontal
+        let stack = NSStackView(views: [title, body, row]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 7; stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.identifier = NSUserInterfaceItemIdentifier(thread.id.uuidString); view.addSubview(stack)
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 58), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 10), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10)])
+        view.setAccessibilityElement(true); view.setAccessibilityLabel("\(thread.state) thread on line \(thread.selection.startLine): \(thread.body)")
+    }
+
+    private func installComposer() {
+        let title = NSTextField(labelWithString: "Draft thread"); title.font = .systemFont(ofSize: 12, weight: .semibold)
+        let field = NSTextField(); field.placeholderString = "Write a comment…"; field.delegate = self
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelComposer))
+        let save = NSButton(title: "Save to Review", target: self, action: #selector(saveComposer)); save.keyEquivalent = "\r"; save.keyEquivalentModifierMask = [.command]
+        let buttons = NSStackView(views: [cancel, save]); buttons.orientation = .horizontal
+        let stack = NSStackView(views: [title, field, buttons]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 7; stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack); NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 58), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 10), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10), field.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+        view.setAccessibilityElement(true); view.setAccessibilityLabel("Inline comment composer")
+    }
+
+    public func controlTextDidChange(_ obj: Notification) { if let field = obj.object as? NSTextField { action?(.updateComposer(field.stringValue)) } }
+    @objc private func showThread(_ sender: NSButton) { guard let id = view.subviews.compactMap({ $0.identifier?.rawValue }).compactMap(UUID.init(uuidString:)).first else { return }; action?(.thread(id)) }
+    @objc private func threadAction(_ sender: NSButton) { guard let id = view.subviews.compactMap({ $0.identifier?.rawValue }).compactMap(UUID.init(uuidString:)).first else { return }; action?(.threadAction(id)) }
+    @objc private func saveComposer() { action?(.saveComposer) }
+    @objc private func cancelComposer() { action?(.cancelComposer) }
 }
 
 private final class ReviewCanvasCollectionView: NSCollectionView {

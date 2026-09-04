@@ -18,6 +18,7 @@ for test_target in \
     RTCDomainTests \
     RTCIPCTests \
     RTCLifecycleTests \
+    RTCReviewPersistenceTests \
     RTCReviewTests \
     RTCReviewWorkspaceFeatureTests \
     RTCSyntaxTests \

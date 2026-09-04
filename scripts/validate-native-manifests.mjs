@@ -71,6 +71,7 @@ const expectedDependencies = {
   RTCIPCTests: ['RTCContracts', 'RTCIPC'],
   RTCLifecycleTests: ['RTCContracts', 'RTCLifecycle'],
   RTCReviewTests: ['RTCContracts', 'RTCDomain', 'RTCReview'],
+  RTCReviewPersistenceTests: ['RTCContracts', 'RTCDomain', 'RTCReview', 'RTCStore'],
   RTCSyntaxTests: ['RTCContracts', 'RTCSyntax'],
   RTCTourTests: ['RTCContracts', 'RTCTour'],
   TourWorkspaceFeatureTests: [
@@ -199,6 +200,7 @@ for (const [directory, packageType, xcodeType] of [
   ['RTCIPCTests', 'executable', 'tool'],
   ['RTCLifecycleTests', 'executable', 'tool'],
   ['RTCReviewTests', 'executable', 'tool'],
+  ['RTCReviewPersistenceTests', 'executable', 'tool'],
   ['RTCSyntaxTests', 'executable', 'tool'],
   ['RTCTourTests', 'executable', 'tool'],
   ['TourWorkspaceFeatureTests', 'executable', 'tool'],

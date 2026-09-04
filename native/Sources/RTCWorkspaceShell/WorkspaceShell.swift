@@ -6,9 +6,9 @@ public enum WorkspacePane: String, Codable, CaseIterable, Sendable { case story,
 public enum WorkspaceMode: String, Codable, Sendable { case diff, tour }
 
 public enum WorkspaceCommand: String, CaseIterable, Sendable {
-    case toggleInbox, showDiff, showTour, toggleAgentRail, toggleComments, markViewed, comment, approve
-    public var keyEquivalent: String { switch self { case .toggleInbox: "0"; case .showDiff: "1"; case .showTour: "2"; case .toggleAgentRail: "i"; case .toggleComments: "3"; case .markViewed: "m"; case .comment: "c"; case .approve: "a" } }
-    public var title: String { switch self { case .toggleInbox: "Show Inbox"; case .showDiff: "Diff"; case .showTour: "Tour"; case .toggleAgentRail: "Toggle Agent Rail"; case .toggleComments: "Toggle Comments"; case .markViewed: "Mark File Viewed"; case .comment: "Add Comment"; case .approve: "Approve Review" } }
+    case toggleInbox, showDiff, showTour, toggleAgentRail, toggleComments, markViewed, comment, sendReview, requestChanges, approve, close
+    public var keyEquivalent: String { switch self { case .toggleInbox: "0"; case .showDiff: "1"; case .showTour: "2"; case .toggleAgentRail: "i"; case .toggleComments: "3"; case .markViewed: "m"; case .comment: "c"; case .approve: "a"; case .sendReview, .requestChanges, .close: "" } }
+    public var title: String { switch self { case .toggleInbox: "Show Inbox"; case .showDiff: "Diff"; case .showTour: "Tour"; case .toggleAgentRail: "Toggle Agent Rail"; case .toggleComments: "Toggle Comments"; case .markViewed: "Mark File Viewed"; case .comment: "Add Comment"; case .sendReview: "Send Review"; case .requestChanges: "Request Changes"; case .approve: "Approve Review"; case .close: "Close Review" } }
     public func menuItem(target: AnyObject, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
         item.target = target
@@ -58,10 +58,10 @@ public final class WorkspaceShell: NSSplitViewController {
     public private(set) var restoration = WorkspaceRestorationState()
     private var paneControllers: [WorkspacePane: NSSplitViewItem] = [:]
 
-    public init(restorationData: Data? = nil, content: [WorkspacePane: NSViewController] = [:]) {
+    public init(restorationData: Data? = nil, content: [WorkspacePane: NSViewController] = [:], enabledPanes: [WorkspacePane] = WorkspacePane.allCases) {
         restoration = restorationData.map(WorkspaceRestorationState.decode) ?? WorkspaceRestorationState()
         super.init(nibName: nil, bundle: nil)
-        WorkspacePane.allCases.forEach { pane in
+        enabledPanes.forEach { pane in
             let controller = content[pane] ?? NSHostingController(rootView: WorkspacePlaceholder(pane: pane))
             let item = NSSplitViewItem(viewController: controller)
             item.minimumThickness = pane == .canvas ? WorkspaceSizing.minimumCanvas : 180
@@ -83,7 +83,7 @@ public final class WorkspaceShell: NSSplitViewController {
 public enum WorkspaceMenus {
     public static func review(target: AnyObject, action: Selector) -> NSMenu {
         let menu = NSMenu(title: "Review")
-        WorkspaceCommand.allCases.filter { [.showDiff, .showTour, .toggleAgentRail, .toggleComments, .markViewed, .comment, .approve].contains($0) }.forEach { menu.addItem($0.menuItem(target: target, action: action)) }
+        WorkspaceCommand.allCases.filter { [.showDiff, .showTour, .toggleAgentRail, .toggleComments, .markViewed, .comment, .sendReview, .requestChanges, .approve, .close].contains($0) }.forEach { menu.addItem($0.menuItem(target: target, action: action)) }
         return menu
     }
 }

@@ -148,6 +148,7 @@ let package = Package(
         .executableTarget(name: "RTCIPCTests", dependencies: ["RTCContracts", "RTCIPC"], path: "Tests/RTCIPCTests"),
         .executableTarget(name: "RTCLifecycleTests", dependencies: ["RTCContracts", "RTCLifecycle"], path: "Tests/RTCLifecycleTests"),
         .executableTarget(name: "RTCReviewTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview"], path: "Tests/RTCReviewTests"),
+        .executableTarget(name: "RTCReviewPersistenceTests", dependencies: ["RTCContracts", "RTCDomain", "RTCReview", "RTCStore"], path: "Tests/RTCReviewPersistenceTests"),
         .executableTarget(name: "RTCSyntaxTests", dependencies: ["RTCContracts", "RTCSyntax"], path: "Tests/RTCSyntaxTests"),
         .executableTarget(name: "RTCTourTests", dependencies: ["RTCContracts", "RTCTour"], path: "Tests/RTCTourTests"),
         .executableTarget(

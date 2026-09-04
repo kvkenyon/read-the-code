@@ -375,6 +375,16 @@ targets:
       - target: RTCContracts
       - target: RTCDomain
       - target: RTCReview
+  RTCReviewPersistenceTests:
+    type: tool
+    platform: macOS
+    sources:
+      - Tests/RTCReviewPersistenceTests
+    dependencies:
+      - target: RTCContracts
+      - target: RTCDomain
+      - target: RTCReview
+      - target: RTCStore
   RTCSyntaxTests:
     type: tool
     platform: macOS

@@ -14,8 +14,8 @@ public struct ReviewRevisionState: Equatable, Sendable {
     public private(set) var status: ReviewStatus
     public private(set) var stale: Bool
 
-    public init(revision: RevisionIdentity, status: ReviewStatus = .ready) {
-        self.revision = revision; self.status = status; self.stale = false
+    public init(revision: RevisionIdentity, status: ReviewStatus = .ready, stale: Bool = false) {
+        self.revision = revision; self.status = status; self.stale = stale
     }
 
     public mutating func markHead(_ headSHA: String) {
