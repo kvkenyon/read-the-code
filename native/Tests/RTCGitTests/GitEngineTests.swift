@@ -72,7 +72,7 @@ final class GitEngineTests: XCTestCase {
         let runner = SystemGitProcessRunner()
         let check = try await runner.runBatch(
             repository: repository.url.path,
-            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-Z"],
+            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-z"],
             standardInput: request,
             outputLimit: 1_024,
             timeout: .seconds(3)
@@ -80,12 +80,12 @@ final class GitEngineTests: XCTestCase {
         XCTAssertTrue(check.stdout.starts(with: Data("blob ".utf8)))
         let contents = try await runner.runBatch(
             repository: repository.url.path,
-            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-Z"],
+            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-z"],
             standardInput: request,
             outputLimit: repository.payload.count + 128,
             timeout: .seconds(3)
         )
-        XCTAssertTrue(contents.stdout.ends(with: Data([0])))
+        XCTAssertEqual(contents.stdout.last, 10)
         XCTAssertNotNil(contents.stdout.range(of: repository.payload))
     }
 

@@ -453,7 +453,7 @@ public actor ExactGitEngine: GitService {
         }
 
         let sizeInput = batchInput(requests)
-        let sizeOutput = try await runBatch(repo, ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-Z"], input: sizeInput, limit: requests.count * 32 + 4_096)
+        let sizeOutput = try await runBatch(repo, ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-z"], input: sizeInput, limit: requests.count * 32 + 4_096)
         let sizes = try parseBatchSizes(sizeOutput, expectedCount: requests.count)
         var result = Dictionary(uniqueKeysWithValues: zip(requests, sizes).map { pair in
             (pair.0, BlobMetadata(size: pair.1, lineCount: nil))
@@ -478,7 +478,7 @@ public actor ExactGitEngine: GitService {
     }
 
     private func fillLineCounts(_ repo: String, values: [(BlobRequest, Int)], result: inout [BlobRequest: BlobMetadata], outputLimit: Int) async throws {
-        let output = try await runBatch(repo, ["cat-file", "--batch=%(objecttype) %(objectsize)", "-Z"], input: batchInput(values.map(\.0)), limit: outputLimit)
+        let output = try await runBatch(repo, ["cat-file", "--batch=%(objecttype) %(objectsize)", "-z"], input: batchInput(values.map(\.0)), limit: outputLimit)
         let blobs = try parseBatchBlobs(output, expectedSizes: values.map(\.1))
         for (value, blob) in zip(values, blobs) {
             let lineFeeds = blob.reduce(into: 0) { if $1 == 10 { $0 += 1 } }
@@ -524,7 +524,7 @@ public actor ExactGitEngine: GitService {
     private func parseBatchSizes(_ data: Data, expectedCount: Int) throws -> [Int] {
         var index = data.startIndex, result: [Int] = []
         while index < data.endIndex {
-            let field = try readField(data, index: &index, delimiter: 0)
+            let field = try readField(data, index: &index, delimiter: 10)
             let parts = String(decoding: field, as: UTF8.self).split(separator: " ")
             guard parts.first == "blob" else { throw GitEngineError.gitFailed }
             guard parts.count == 2, let size = Int(parts[1]), size >= 0 else { throw GitEngineError.invalidDiff }
@@ -537,7 +537,7 @@ public actor ExactGitEngine: GitService {
     private func parseBatchBlobs(_ data: Data, expectedSizes: [Int]) throws -> [Data] {
         var index = data.startIndex, result: [Data] = []
         for expectedSize in expectedSizes {
-            let field = try readField(data, index: &index, delimiter: 0)
+            let field = try readField(data, index: &index, delimiter: 10)
             let parts = String(decoding: field, as: UTF8.self).split(separator: " ")
             guard parts.first == "blob" else { throw GitEngineError.gitFailed }
             guard parts.count == 2, Int(parts[1]) == expectedSize,
@@ -545,7 +545,7 @@ public actor ExactGitEngine: GitService {
             else { throw GitEngineError.invalidDiff }
             let end = data.index(index, offsetBy: expectedSize)
             result.append(data[index..<end]); index = end
-            guard index < data.endIndex, data[index] == 0 else { throw GitEngineError.invalidDiff }
+            guard index < data.endIndex, data[index] == 10 else { throw GitEngineError.invalidDiff }
             index += 1
         }
         guard index == data.endIndex else { throw GitEngineError.invalidDiff }

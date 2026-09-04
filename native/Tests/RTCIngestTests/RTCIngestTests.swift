@@ -261,7 +261,7 @@ struct RTCIngestTests {
         try runGit(repository, ["branch", "--force", "head-ref", movedHead])
         try runGit(repository, ["replace", base, head])
 
-        // Temporary CI probe for the security-pinned process path: both batch modes
+        // CI probe for the security-pinned process path: both batch modes
         // must accept a NUL-delimited committed-object request and close within three
         // seconds. The status assertion below carries this evidence if materialization
         // still fails on a different host.
@@ -275,19 +275,19 @@ struct RTCIngestTests {
         )
         let checkBatch = try await runner.runBatch(
             repository: repository.path,
-            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-Z"],
+            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-z"],
             standardInput: request,
             outputLimit: 1_024,
             timeout: .seconds(3)
         )
         let contentBatch = try await runner.runBatch(
             repository: repository.path,
-            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-Z"],
+            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-z"],
             standardInput: request,
             outputLimit: 1_024,
             timeout: .seconds(3)
         )
-        check(checkBatch.stdout.starts(with: Data("blob ".utf8)) && contentBatch.stdout.last == 0, "pinned Git batch runner completes bounded requests")
+        check(checkBatch.stdout.starts(with: Data("blob ".utf8)) && contentBatch.stdout.last == 10, "pinned Git batch runner completes bounded requests")
 
         let presenter = RecordingPresenter()
         let runtime = try await RTCIngestRuntime(paths: paths, notificationPresenter: presenter)
