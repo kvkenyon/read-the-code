@@ -66,6 +66,29 @@ final class GitEngineTests: XCTestCase {
         }
     }
 
+    func testRealBatchRunnerClosesAfterCheckAndContentRequests() async throws {
+        let repository = try LargeOutputRepository()
+        let request = Data("\(repository.head):payload.txt\0".utf8)
+        let runner = SystemGitProcessRunner()
+        let check = try await runner.runBatch(
+            repository: repository.url.path,
+            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-Z"],
+            standardInput: request,
+            outputLimit: 1_024,
+            timeout: .seconds(3)
+        )
+        XCTAssertTrue(check.stdout.starts(with: Data("blob ".utf8)))
+        let contents = try await runner.runBatch(
+            repository: repository.url.path,
+            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-Z"],
+            standardInput: request,
+            outputLimit: repository.payload.count + 128,
+            timeout: .seconds(3)
+        )
+        XCTAssertTrue(contents.stdout.ends(with: Data([0])))
+        XCTAssertNotNil(contents.stdout.range(of: repository.payload))
+    }
+
     func testMalformedNameStatusRemainsInvalidDiff() async throws {
         let repository = try HostileFilenameRepository()
         let engine = ExactGitEngine(runner: NameStatusFaultRunner(fault: .malformed))
