@@ -262,6 +262,52 @@ private actor TailConflictRepository: EventRepository {
         let validMessage=ThreadMessage(id: eventID, sequence: 1, author: .captain, body: fixture.body, createdAt: Date(timeIntervalSince1970: 10))
         let validThread=ReviewThread(id: eventID, reviewID: fixture.revision.reviewID, revision: fixture.revision, anchor: fixture.anchor, messages: [validMessage])
 
+        let encodedThread = try jsonObject(validThread)
+        var canonicalReducer = try ReviewReducer(manifest: fixture.manifest)
+        try canonicalReducer.apply(ReviewEvent(
+            id: eventID,
+            reviewID: fixture.revision.reviewID,
+            revision: fixture.revision,
+            sequence: 1,
+            kind: .threadCreated,
+            payload: try payload(["thread": encodedThread]),
+            createdAt: Date(timeIntervalSince1970: 10)
+        ))
+        precondition(canonicalReducer.snapshot.threads.map(\.id) == [eventID], "encoder-produced scalar review ID survives strict replay")
+
+        let legacyEventID = UUID()
+        let legacyMessage = ThreadMessage(id: legacyEventID, sequence: 1, author: .captain, body: fixture.body, createdAt: Date(timeIntervalSince1970: 10))
+        let legacyThread = ReviewThread(id: legacyEventID, reviewID: fixture.revision.reviewID, revision: fixture.revision, anchor: fixture.anchor, messages: [legacyMessage])
+        var legacyThreadObject = try jsonObject(legacyThread) as! [String: Any]
+        legacyThreadObject["reviewID"] = ["value": fixture.revision.reviewID.value]
+        var legacyReducer = try ReviewReducer(manifest: fixture.manifest)
+        try legacyReducer.apply(ReviewEvent(
+            id: legacyEventID,
+            reviewID: fixture.revision.reviewID,
+            revision: fixture.revision,
+            sequence: 1,
+            kind: .threadCreated,
+            payload: try payload(["thread": legacyThreadObject]),
+            createdAt: Date(timeIntervalSince1970: 10)
+        ))
+        precondition(legacyReducer.snapshot.threads.map(\.id) == [legacyEventID], "legacy object review ID survives strict replay")
+
+        for malformedReviewID: Any in [
+            String(repeating: "a", count: 23),
+            String(repeating: "g", count: 24),
+            ["value": String(repeating: "a", count: 23)],
+            ["value": fixture.revision.reviewID.value, "unexpected": true],
+        ] {
+            var malformedThread = try jsonObject(validThread) as! [String: Any]
+            malformedThread["reviewID"] = malformedReviewID
+            try expectPayloadCorrupt(
+                kind: .threadCreated,
+                payload: payload(["thread": malformedThread]),
+                fixture: fixture,
+                reason: "invalid payload schema"
+            )
+        }
+
         for kind in [ReviewEventKind.threadCreated, .threadMessageAdded, .fileProgressChanged, .feedback, .changesRequested, .approval, .threadResolved, .threadReopened] {
             try expectPayloadCorrupt(kind: kind, payload: payload([:]), fixture: fixture, reason: "invalid payload schema")
         }

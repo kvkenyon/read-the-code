@@ -389,42 +389,63 @@ struct RTCIngestTests {
 
     static func checkEventTransactions(root: URL, revision: RevisionIdentity) async throws {
         let store = try SQLiteStore(rootURL: root.appendingPathComponent("event-transactions", isDirectory: true))
+        let manifest = ReviewManifest(
+            id: revision.reviewID,
+            revision: revision,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            status: .ready,
+            stale: false,
+            summary: ReviewSummary(files: 0, additions: 0, deletions: 0),
+            files: []
+        )
+        try await SQLiteReviewRepository(store: store).save(manifest)
         let events = SQLiteEventRepository(store: store)
         let duplicateID = UUID()
-        try await events.append(try event(id: duplicateID, revision: revision, payload: ["value": "first"]))
-        try await events.append(try event(id: duplicateID, revision: revision, payload: ["value": "duplicate"]))
-        try await events.append(try event(id: UUID(), revision: revision, payload: ["value": "second"]))
+        let first = event(id: duplicateID, revision: revision, payload: ["value": "first"])
+        let appendedFirst = try await events.append(first, after: 0)
+        let retriedFirst = try await events.append(first, after: 99)
+        check(appendedFirst == retriedFirst, "an exact event retry returns the committed sequence")
+        do {
+            _ = try await events.append(
+                event(id: duplicateID, revision: revision, payload: ["value": "duplicate"]), after: 1)
+            preconditionFailure("an event ID collision must fail")
+        } catch {
+            check(error as? EventRepositoryError == .idempotencyConflict, "an event ID cannot change payload")
+        }
+        _ = try await events.append(event(id: UUID(), revision: revision, payload: ["value": "second"]), after: 1)
         let initial = try await events.events(after: 0, reviewID: revision.reviewID)
-        check(initial.map(\.sequence) == [1, 2] && initial.first?.payload["value"] == "first", "duplicate event IDs are idempotent without consuming a sequence")
+        check(initial.map(\.sequence) == [1, 2] && initial.first?.payload["value"] == "first", "event retries do not consume a sequence")
 
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        let winners = try await withThrowingTaskGroup(of: Bool.self, returning: Int.self) { group in
             for index in 0..<16 {
                 group.addTask {
-                    try await events.append(try event(id: UUID(), revision: revision, payload: ["index": "\(index)"]))
+                    do {
+                        _ = try await events.append(
+                            event(id: UUID(), revision: revision, payload: ["index": "\(index)"]), after: 2)
+                        return true
+                    } catch EventRepositoryError.concurrentModification {
+                        return false
+                    }
                 }
             }
-            try await group.waitForAll()
+            var successes = 0
+            for try await won in group where won { successes += 1 }
+            return successes
         }
         let appended = try await events.events(after: 0, reviewID: revision.reviewID)
-        check(appended.map(\.sequence) == Array(1...18), "concurrent event appends commit monotonically in one writer transaction")
+        check(winners == 1 && appended.map(\.sequence) == [1, 2, 3], "concurrent event appends have one monotonic CAS winner")
     }
 
-    static func event(id: UUID, revision: RevisionIdentity, payload: [String: String]) throws -> ReviewEvent {
-        let fixture = ReviewEventFixture(
-            schemaVersion: RTCConstants.schemaVersion,
+    static func event(id: UUID, revision: RevisionIdentity, payload: [String: String]) -> PendingReviewEvent {
+        PendingReviewEvent(
             id: id,
             reviewID: revision.reviewID,
             revision: revision,
-            sequence: 0,
             kind: .feedback,
             payload: payload,
-            createdAt: Date()
+            createdAt: Date(timeIntervalSince1970: 100)
         )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(ReviewEvent.self, from: encoder.encode(fixture))
     }
 
     static func checkGitSizeBoundaries(root: URL) async throws {
@@ -491,17 +512,6 @@ struct RTCIngestTests {
 }
 
 private enum AtomicityProbe: Error { case injected }
-
-private struct ReviewEventFixture: Encodable {
-    let schemaVersion: Int
-    let id: UUID
-    let reviewID: ReviewID
-    let revision: RevisionIdentity
-    let sequence: Int
-    let kind: ReviewEventKind
-    let payload: [String: String]
-    let createdAt: Date
-}
 
 private actor FakeGit: IngestGitService {
     private var refs = [String: String]()
