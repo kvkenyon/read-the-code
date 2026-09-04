@@ -14,6 +14,15 @@ public enum IPCConstants {
     public static let protocolMinor = 0
 }
 
+public func syncIPCDirectory(_ directory: URL) throws {
+    let fd = open(directory.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { throw IPCTransportError.writeFailed }
+    defer { close(fd) }
+    var info = stat()
+    guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+          fsync(fd) == 0 else { throw IPCTransportError.writeFailed }
+}
+
 public struct IPCProtocolVersion: Codable, Equatable, Sendable {
     public let major: Int
     public let minor: Int
@@ -422,12 +431,17 @@ public struct SpoolTransport: Sendable {
             var destination = directory.appendingPathComponent("\(id.uuidString).spool")
             if FileManager.default.fileExists(atPath: destination.path) { destination = directory.appendingPathComponent("\(id.uuidString)-\(UUID().uuidString).spool") }
             try FileManager.default.moveItem(at: tmp, to: destination)
+            try syncIPCDirectory(directory)
             return destination
         } catch {
             try? FileManager.default.removeItem(at: tmp); throw error
         }
     }
     public func replay(_ consume: (Data) throws -> Void) throws {
-        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "spool" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) { try consume(Data(contentsOf: url)); try FileManager.default.removeItem(at: url) }
+        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "spool" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            try consume(Data(contentsOf: url))
+            try FileManager.default.removeItem(at: url)
+            try syncIPCDirectory(directory)
+        }
     }
 }

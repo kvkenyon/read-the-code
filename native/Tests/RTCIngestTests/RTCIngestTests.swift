@@ -177,6 +177,8 @@ struct RTCIngestTests {
         let claims = [firstClaim, secondClaim].compactMap { $0 }
         check(claims.count == 1, "notification outbox has a single CAS claimant")
 
+        try await checkStalenessPagination(root: root, base: base, head: firstHead, movedBase: secondHead)
+        try await checkEventTransactions(root: root, revision: restartRevision)
         try await checkOfflineCLI(root: root)
         try await checkGitSizeBoundaries(root: root)
 
@@ -191,7 +193,8 @@ struct RTCIngestTests {
         try runGit(repository, ["init", "--quiet"])
         let source = repository.appendingPathComponent("example.txt")
         try Data("committed base\n".utf8).write(to: source)
-        try runGit(repository, ["add", "--", "example.txt"])
+        try Data("example.txt text\n".utf8).write(to: repository.appendingPathComponent(".gitattributes"))
+        try runGit(repository, ["add", "--", "example.txt", ".gitattributes"])
         try runGit(repository, ["-c", "user.name=RTC", "-c", "user.email=rtc@example.invalid", "commit", "--quiet", "-m", "base"])
         let base = try gitOutput(repository, ["rev-parse", "HEAD"])
         try runGit(repository, ["branch", "base-ref", base])
@@ -202,6 +205,10 @@ struct RTCIngestTests {
         try runGit(repository, ["branch", "head-ref", head])
         try Data("dirty working tree must not appear\n".utf8).write(to: source)
         try Data("example.txt binary\n".utf8).write(to: repository.appendingPathComponent(".gitattributes"))
+        try Data("example.txt binary\n".utf8).write(to: repository.appendingPathComponent(".git/info/attributes"))
+        let externalAttributes = root.appendingPathComponent("external-attributes")
+        try Data("example.txt binary\n".utf8).write(to: externalAttributes)
+        try runGit(repository, ["config", "core.attributesFile", externalAttributes.path])
         let engine = ExactGitEngine()
         let directlyResolved = try await engine.resolveSubmission(
             repositoryPath: repository.path,
@@ -320,6 +327,106 @@ struct RTCIngestTests {
         } catch GitEngineError.invalidRepository {}
     }
 
+    static func checkStalenessPagination(root: URL, base: String, head: String, movedBase: String) async throws {
+        let pageRoot = root.appendingPathComponent("staleness-pages", isDirectory: true)
+        let store = try SQLiteStore(rootURL: pageRoot)
+        let records = SQLiteIngestRepository(store: store)
+        let git = FakeGit()
+        await git.set(ref: "base", sha: base)
+        await git.set(ref: "head", sha: head)
+        let identity = SHA256Digest(data: Data("fake-repository".utf8))
+        var active = [IngestReviewRecord]()
+        for index in 0..<5 {
+            let revision = try RevisionIdentity(repositoryPath: "/tmp/staleness-active-\(index)", baseSHA: base, headSHA: head)
+            let submission = ReviewSubmission(
+                repositoryPath: revision.repositoryPath,
+                repositoryIdentity: identity,
+                base: SubmittedRef(label: "base", expectedSHA: base),
+                head: SubmittedRef(label: "head", expectedSHA: head),
+                notify: false
+            )
+            active.append(try await records.accept(submission, revision: revision).0)
+        }
+        var terminalPaths = Set<String>()
+        for index in 0..<3 {
+            let revision = try RevisionIdentity(repositoryPath: "/tmp/staleness-terminal-\(index)", baseSHA: base, headSHA: head)
+            let submission = ReviewSubmission(
+                repositoryPath: revision.repositoryPath,
+                repositoryIdentity: identity,
+                base: SubmittedRef(label: "base", expectedSHA: base),
+                head: SubmittedRef(label: "head", expectedSHA: head),
+                notify: false
+            )
+            _ = try await records.accept(submission, revision: revision)
+            _ = try await records.close(revision.reviewID)
+            terminalPaths.insert(revision.repositoryPath)
+        }
+
+        let coordinator = SubmissionCoordinator(git: git, records: records, notifications: RecordingNotifications())
+        await git.clearResolvedPaths()
+        try await coordinator.refreshStaleness(limit: 2)
+        try await coordinator.refreshStaleness(limit: 2)
+        let beforeRestart = await git.resolvedPaths
+        check(Set(beforeRestart).count == 4 && Set(beforeRestart).isDisjoint(with: terminalPaths), "staleness pages filter terminal rows before the limit")
+
+        let ordered = active.sorted { $0.reviewID.value < $1.reviewID.value }
+        let reopenedStore = try SQLiteStore(rootURL: pageRoot)
+        let reopenedRecords = SQLiteIngestRepository(store: reopenedStore)
+        let reopenedCoordinator = SubmissionCoordinator(git: git, records: reopenedRecords, notifications: RecordingNotifications())
+        await git.clearResolvedPaths()
+        try await reopenedCoordinator.refreshStaleness(limit: 2)
+        let afterRestart = await git.resolvedPaths
+        check(afterRestart.first == ordered[4].revision.repositoryPath, "staleness cursor survives restart and resumes the next page")
+        check(Set(beforeRestart + afterRestart) == Set(active.map(\.revision.repositoryPath)), "bounded staleness rotation covers every active review")
+
+        let movedHead = String(repeating: "e", count: 40)
+        await git.set(ref: "base", sha: movedBase)
+        await git.set(ref: "head", sha: movedHead)
+        for _ in 0..<3 { try await reopenedCoordinator.refreshStaleness(limit: 2) }
+        let refreshed = try await reopenedRecords.reviews().filter { !terminalPaths.contains($0.revision.repositoryPath) }
+        check(refreshed.count == active.count && refreshed.allSatisfy(\.stale), "simultaneous base and head movement eventually marks every active review stale")
+    }
+
+    static func checkEventTransactions(root: URL, revision: RevisionIdentity) async throws {
+        let store = try SQLiteStore(rootURL: root.appendingPathComponent("event-transactions", isDirectory: true))
+        let events = SQLiteEventRepository(store: store)
+        let duplicateID = UUID()
+        try await events.append(try event(id: duplicateID, revision: revision, payload: ["value": "first"]))
+        try await events.append(try event(id: duplicateID, revision: revision, payload: ["value": "duplicate"]))
+        try await events.append(try event(id: UUID(), revision: revision, payload: ["value": "second"]))
+        let initial = try await events.events(after: 0, reviewID: revision.reviewID)
+        check(initial.map(\.sequence) == [1, 2] && initial.first?.payload["value"] == "first", "duplicate event IDs are idempotent without consuming a sequence")
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<16 {
+                group.addTask {
+                    try await events.append(try event(id: UUID(), revision: revision, payload: ["index": "\(index)"]))
+                }
+            }
+            try await group.waitForAll()
+        }
+        let appended = try await events.events(after: 0, reviewID: revision.reviewID)
+        check(appended.map(\.sequence) == Array(1...18), "concurrent event appends commit monotonically in one writer transaction")
+    }
+
+    static func event(id: UUID, revision: RevisionIdentity, payload: [String: String]) throws -> ReviewEvent {
+        let fixture = ReviewEventFixture(
+            schemaVersion: RTCConstants.schemaVersion,
+            id: id,
+            reviewID: revision.reviewID,
+            revision: revision,
+            sequence: 0,
+            kind: .feedback,
+            payload: payload,
+            createdAt: Date()
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ReviewEvent.self, from: encoder.encode(fixture))
+    }
+
     static func checkGitSizeBoundaries(root: URL) async throws {
         let repository = root.appendingPathComponent("limits", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -385,13 +492,26 @@ struct RTCIngestTests {
 
 private enum AtomicityProbe: Error { case injected }
 
+private struct ReviewEventFixture: Encodable {
+    let schemaVersion: Int
+    let id: UUID
+    let reviewID: ReviewID
+    let revision: RevisionIdentity
+    let sequence: Int
+    let kind: ReviewEventKind
+    let payload: [String: String]
+    let createdAt: Date
+}
+
 private actor FakeGit: IngestGitService {
     private var refs = [String: String]()
     private var failure: GitEngineError?
+    private(set) var resolvedPaths = [String]()
 
     func set(ref: String, sha: String) { refs[ref] = sha }
     func remove(ref: String) { refs[ref] = nil }
     func setFailure(_ failure: GitEngineError?) { self.failure = failure }
+    func clearResolvedPaths() { resolvedPaths.removeAll() }
 
     func resolveRevision(repositoryPath: String, base: String, head: String) async throws -> RevisionIdentity {
         guard let baseSHA = refs[base] ?? full(base), let headSHA = refs[head] ?? full(head) else {
@@ -401,7 +521,8 @@ private actor FakeGit: IngestGitService {
     }
 
     func resolveSubmission(repositoryPath: String, base: String, head: String) async throws -> ExactGitEngine.ResolvedSubmission {
-        ExactGitEngine.ResolvedSubmission(
+        resolvedPaths.append(repositoryPath)
+        return ExactGitEngine.ResolvedSubmission(
             revision: try await resolveRevision(repositoryPath: repositoryPath, base: base, head: head),
             repositoryIdentity: SHA256Digest(data: Data("fake-repository".utf8))
         )

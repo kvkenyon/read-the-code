@@ -70,7 +70,7 @@ public actor SubmissionCoordinator {
     }
 
     public func refreshStaleness(limit: Int = 8) async throws {
-        for record in try await records.reviews(limit: max(0, min(limit, 64))) where record.status != .superseded && record.status != .closed {
+        for record in try await records.nextStalenessBatch(limit: limit) {
             do {
                 let resolved = try await git.resolveSubmission(repositoryPath: record.revision.repositoryPath, base: record.baseRef, head: record.headRef)
                 guard resolved.repositoryIdentity == record.repositoryIdentity else {

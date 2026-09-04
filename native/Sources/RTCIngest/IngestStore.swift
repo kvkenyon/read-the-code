@@ -98,6 +98,40 @@ public actor SQLiteIngestRepository {
         }
     }
 
+    /// Advances a durable cursor across active reviews before returning a bounded
+    /// page. Wrapping within one page keeps every review in the rotation even
+    /// when terminal rows or newly inserted review IDs surround the cursor.
+    public func nextStalenessBatch(limit: Int) async throws -> [IngestReviewRecord] {
+        let boundedLimit = max(0, min(limit, 64))
+        guard boundedLimit > 0 else { return [] }
+        return try await store.write { db in
+            let key = "rtc.ingest.staleness-cursor"
+            let cursorData = try Data.fetchOne(db, sql: "SELECT value FROM settings WHERE key = ?", arguments: [key])
+            let cursor = cursorData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let active = "status NOT IN ('closed', 'superseded')"
+            var rows = try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM ingest_reviews WHERE \(active) AND review_id > ? ORDER BY review_id LIMIT ?",
+                arguments: [cursor, boundedLimit]
+            )
+            if rows.count < boundedLimit {
+                rows += try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM ingest_reviews WHERE \(active) AND review_id <= ? ORDER BY review_id LIMIT ?",
+                    arguments: [cursor, boundedLimit - rows.count]
+                )
+            }
+            let records = try rows.map { try Self.decode($0) }
+            if let nextCursor = records.last?.reviewID.value {
+                try db.execute(
+                    sql: "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    arguments: [key, Data(nextCursor.utf8)]
+                )
+            }
+            return records
+        }
+    }
+
     public func changes(reviewID: ReviewID, after: Int, full: Bool) async throws -> [ReviewStatusResponse] {
         try await store.read { db in
             let limit = full ? 256 : 1

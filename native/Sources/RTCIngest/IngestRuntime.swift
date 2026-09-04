@@ -35,7 +35,11 @@ public struct RTCInstallationPaths: Sendable {
 
     public func prepare(createCapability: Bool) throws -> String {
         try protectDirectory(root); try protectDirectory(spool)
-        if let value = try? readCapability() { return value }
+        if let value = try? readCapability() {
+            do { try syncIPCDirectory(root) }
+            catch { throw IPCTransportError.unavailable }
+            return value
+        }
         guard createCapability else { throw IPCTransportError.unavailable }
         let value = UUID().uuidString.replacingOccurrences(of: "-", with: "") + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let fd = open(capability.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -56,6 +60,8 @@ public struct RTCInstallationPaths: Sendable {
             }
         }
         guard fsync(fd) == 0 else { throw IPCTransportError.unavailable }
+        do { try syncIPCDirectory(root) }
+        catch { throw IPCTransportError.unavailable }
         return value
     }
 
@@ -187,6 +193,7 @@ public final class RTCIngestRuntime: @unchecked Sendable {
             ))
             if response.ok {
                 try FileManager.default.removeItem(at: url)
+                try syncIPCDirectory(paths.spool)
                 try await records.clearSpoolRetry(fileName: url.lastPathComponent)
             } else if response.error?.retryable == true {
                 let retry = try await records.recordSpoolRetry(fileName: url.lastPathComponent, code: response.error?.code.rawValue ?? "RETRYABLE")
@@ -225,5 +232,6 @@ public final class RTCIngestRuntime: @unchecked Sendable {
             target = url.deletingPathExtension().appendingPathExtension("\(UUID().uuidString).rejected")
         }
         try FileManager.default.moveItem(at: url, to: target)
+        try syncIPCDirectory(paths.spool)
     }
 }
