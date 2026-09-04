@@ -106,7 +106,7 @@ public struct SystemGitProcessRunner: GitBatchProcessRunning {
                         state.processExited(status: waited == pid ? status : -1)
                     }
                     Task {
-                        do { try await Task.sleep(for: timeout); if !Task.isCancelled, state.timeout() { box.terminate() } }
+                        do { try await Task.sleep(for: timeout); if !Task.isCancelled { _ = state.timeout() } }
                         catch { }
                     }
                     if let standardInput, let stdinPipe {
