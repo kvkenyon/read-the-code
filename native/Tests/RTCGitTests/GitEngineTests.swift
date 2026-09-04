@@ -31,6 +31,41 @@ final class GitEngineTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: repository.url.path).sorted(), entriesBefore)
     }
 
+    func testRepeatedGitOutputAndMaterializationKeepValidRefsIntact() async throws {
+        let outputRepository = try LargeOutputRepository()
+        let hostileRepository = try HostileFilenameRepository()
+        let hostileRevision = try await ExactGitEngine().resolveRevision(
+            repositoryPath: hostileRepository.url.path,
+            base: hostileRepository.base,
+            head: hostileRepository.head
+        )
+
+        for _ in 0..<8 {
+            let result = try await SystemGitProcessRunner().run(
+                repository: outputRepository.url.path,
+                arguments: ["cat-file", "blob", "\(outputRepository.head):payload.txt"],
+                outputLimit: outputRepository.payload.count + 1,
+                timeout: .seconds(30)
+            )
+            XCTAssertEqual(result.stdout, outputRepository.payload)
+            XCTAssertTrue(result.stderr.isEmpty)
+
+            let manifest = try await ExactGitEngine().materialize(hostileRevision)
+            XCTAssertEqual(Set(manifest.files.map(\.path)), Set(hostileRepository.committedPaths))
+        }
+
+        do {
+            _ = try await ExactGitEngine().resolveRevision(
+                repositoryPath: hostileRepository.url.path,
+                base: "--upload-pack=hostile",
+                head: hostileRepository.head
+            )
+            XCTFail("option-like refs must remain rejected")
+        } catch let error as GitEngineError {
+            XCTAssertEqual(error, .invalidRef)
+        }
+    }
+
     func testMalformedNameStatusRemainsInvalidDiff() async throws {
         let repository = try HostileFilenameRepository()
         let engine = ExactGitEngine(runner: NameStatusFaultRunner(fault: .malformed))
@@ -70,6 +105,52 @@ final class GitEngineTests: XCTestCase {
     func testContextHashIsFullSha256() throws {
         let digest = SHA256Digest(data: Data("committed tree".utf8))
         XCTAssertEqual(digest.hex.count, 64)
+    }
+}
+
+private final class LargeOutputRepository {
+    let url: URL
+    let payload: Data
+    private(set) var head = ""
+
+    init() throws {
+        url = FileManager.default.temporaryDirectory.appendingPathComponent("RTCGitOutputTests-\(UUID().uuidString)", isDirectory: true)
+        payload = Data((0..<128_000).map { UInt8($0 % 251) })
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        do {
+            try git(["init", "--quiet"])
+            try git(["config", "user.name", "RTC Tests"])
+            try git(["config", "user.email", "rtc-tests@example.invalid"])
+            try payload.write(to: url.appendingPathComponent("payload.txt"))
+            try git(["add", "--", "payload.txt"])
+            try git(["commit", "--quiet", "-m", "payload"])
+            head = try gitString(["rev-parse", "HEAD"])
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+    }
+
+    deinit { try? FileManager.default.removeItem(at: url) }
+
+    private func git(_ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: SystemGitProcessRunner.executable)
+        process.arguments = ["-C", url.path] + arguments
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw GitEngineError.gitFailed }
+    }
+
+    private func gitString(_ arguments: [String]) throws -> String {
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: SystemGitProcessRunner.executable)
+        process.arguments = ["-C", url.path] + arguments
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw GitEngineError.gitFailed }
+        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
