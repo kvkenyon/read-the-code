@@ -261,6 +261,34 @@ struct RTCIngestTests {
         try runGit(repository, ["branch", "--force", "head-ref", movedHead])
         try runGit(repository, ["replace", base, head])
 
+        // CI probe for the security-pinned process path: both batch modes
+        // must accept a NUL-delimited committed-object request and close within three
+        // seconds. The status assertion below carries this evidence if materialization
+        // still fails on a different host.
+        let runner = SystemGitProcessRunner()
+        let request = Data("\(head):example.txt\0".utf8)
+        let gitVersion = try await runner.run(
+            repository: repository.path,
+            arguments: ["--version"],
+            outputLimit: 1_024,
+            timeout: .seconds(3)
+        )
+        let checkBatch = try await runner.runBatch(
+            repository: repository.path,
+            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-z"],
+            standardInput: request,
+            outputLimit: 1_024,
+            timeout: .seconds(3)
+        )
+        let contentBatch = try await runner.runBatch(
+            repository: repository.path,
+            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-z"],
+            standardInput: request,
+            outputLimit: 1_024,
+            timeout: .seconds(3)
+        )
+        check(checkBatch.stdout.starts(with: Data("blob ".utf8)) && contentBatch.stdout.last == 10, "pinned Git batch runner completes bounded requests")
+
         let presenter = RecordingPresenter()
         let runtime = try await RTCIngestRuntime(paths: paths, notificationPresenter: presenter)
         try await runtime.start()
@@ -272,7 +300,9 @@ struct RTCIngestTests {
         let status = try await runtime.coordinator.status(record.reviewID)
         let evidence = try await runtime.reviewRepository.review(id: record.reviewID)
         check(record.revision.baseSHA == base && record.revision.headSHA == head, "app resolves exact full SHAs")
-        check(status.status == .ready, "spooled submission materializes after app launch")
+        let version = String(decoding: gitVersion.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let failure = "status=\(status.status.rawValue) code=\(status.errorCode ?? "none") message=\(status.errorMessage ?? "none") git=\(version)"
+        check(status.status == .ready, "spooled submission materializes after app launch (\(failure))")
         check(evidence?.files.count == 1, "real Git evidence persisted")
         let evidenceText = evidence?.files.flatMap(\.hunks).flatMap(\.lines).map(\.text).joined(separator: "\n") ?? ""
         check(!evidenceText.contains("dirty working tree") && !evidenceText.contains("symbolic ref moved"), "materialization excludes working tree and moved labels")
