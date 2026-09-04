@@ -131,6 +131,7 @@ let package = Package(
         .testTarget(name: "RTCStoreTests", dependencies: ["RTCStore"]),
         .testTarget(name: "RTCWorkspaceShellTests", dependencies: ["RTCWorkspaceShell"]),
         .testTarget(name: "RTCSettingsTests", dependencies: ["RTCSettings"]),
+        .testTarget(name: "TourWorkspaceUITests", dependencies: []),
         // The landed smoke modules intentionally own their entry points. The native gate
         // runs every one after building the graph.
         .executableTarget(name: "RTCCLITests", dependencies: ["RTCCLI"], path: "Tests/RTCCLITests"),

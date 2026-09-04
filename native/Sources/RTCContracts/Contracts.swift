@@ -91,25 +91,8 @@ public struct ReviewAnchor: Codable, Hashable, Sendable {
         let hasRange = startLine != nil || endLine != nil
         guard validPath(path), oldPath.map(validPath) ?? true,
             !hasRange || (startLine ?? 0) > 0 && (endLine ?? 0) >= (startLine ?? 0),
-            hasRange || startContextHash == nil && endContextHash == nil,
-            hunkIndex.map({ $0 >= 0 }) ?? true
+            scope != .line || side != nil
         else { throw RTCContractError.invalid("anchor") }
-        switch scope {
-        case .general, .file:
-            guard side == nil, !hasRange, hunkIndex == nil, symbol == nil else {
-                throw RTCContractError.invalid("anchor")
-            }
-        case .line:
-            guard side != nil, hasRange, symbol == nil else { throw RTCContractError.invalid("anchor") }
-        case .hunk:
-            guard hunkIndex != nil, symbol == nil, !hasRange || side != nil else {
-                throw RTCContractError.invalid("anchor")
-            }
-        case .symbol:
-            guard let symbol, !symbol.value.isEmpty, side == nil, !hasRange, hunkIndex == nil else {
-                throw RTCContractError.invalid("anchor")
-            }
-        }
         self.revision = revision; self.path = path; self.oldPath = oldPath; self.scope = scope; self.side = side;
         self.startLine = startLine; self.endLine = endLine; self.startContextHash = startContextHash;
         self.endContextHash = endContextHash; self.hunkIndex = hunkIndex; self.symbol = symbol

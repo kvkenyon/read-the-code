@@ -336,6 +336,29 @@ public struct TourValidator: Sendable {
         }
         func checkAnchor(_ anchor: ReviewAnchor, _ location: String) async {
             cited += 1
+            let hasRange = anchor.startLine != nil || anchor.endLine != nil
+            let structurallyValid: Bool
+            switch anchor.scope {
+            case .general, .file:
+                structurallyValid = anchor.side == nil && !hasRange && anchor.hunkIndex == nil && anchor.symbol == nil
+            case .line:
+                structurallyValid = anchor.side != nil && hasRange && anchor.hunkIndex == nil && anchor.symbol == nil
+            case .hunk:
+                structurallyValid =
+                    anchor.hunkIndex.map({ $0 >= 0 }) ?? false
+                    && anchor.symbol == nil && (!hasRange || anchor.side != nil)
+            case .symbol:
+                structurallyValid =
+                    anchor.symbol.map({ !$0.value.isEmpty }) ?? false
+                    && anchor.side == nil && !hasRange && anchor.hunkIndex == nil
+            }
+            guard structurallyValid, hasRange || anchor.startContextHash == nil && anchor.endContextHash == nil else {
+                issues.append(
+                    .init(
+                        code: .unresolvedAnchor, location: location,
+                        message: "anchor structure is invalid"))
+                return
+            }
             if anchor.revision != revision {
                 issues.append(
                     .init(

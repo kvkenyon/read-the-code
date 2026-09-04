@@ -392,7 +392,7 @@ targets:
       - target: RTCTour
       - target: RTCTourIntegration
       - target: TourWorkspace
-  RTCUITests:
+  TourWorkspaceUITests:
     type: bundle.ui-testing
     platform: macOS
     sources:
