@@ -66,6 +66,29 @@ final class GitEngineTests: XCTestCase {
         }
     }
 
+    func testRealBatchRunnerClosesAfterCheckAndContentRequests() async throws {
+        let repository = try LargeOutputRepository()
+        let request = Data("\(repository.head):payload.txt\0".utf8)
+        let runner = SystemGitProcessRunner()
+        let check = try await runner.runBatch(
+            repository: repository.url.path,
+            arguments: ["cat-file", "--batch-check=%(objecttype) %(objectsize)", "-z"],
+            standardInput: request,
+            outputLimit: 1_024,
+            timeout: .seconds(3)
+        )
+        XCTAssertTrue(check.stdout.starts(with: Data("blob ".utf8)))
+        let contents = try await runner.runBatch(
+            repository: repository.url.path,
+            arguments: ["cat-file", "--batch=%(objecttype) %(objectsize)", "-z"],
+            standardInput: request,
+            outputLimit: repository.payload.count + 128,
+            timeout: .seconds(3)
+        )
+        XCTAssertEqual(contents.stdout.last, 10)
+        XCTAssertNotNil(contents.stdout.range(of: repository.payload))
+    }
+
     func testMalformedNameStatusRemainsInvalidDiff() async throws {
         let repository = try HostileFilenameRepository()
         let engine = ExactGitEngine(runner: NameStatusFaultRunner(fault: .malformed))
@@ -105,6 +128,38 @@ final class GitEngineTests: XCTestCase {
     func testContextHashIsFullSha256() throws {
         let digest = SHA256Digest(data: Data("committed tree".utf8))
         XCTAssertEqual(digest.hex.count, 64)
+    }
+
+    func testBatchedReadsPreserveHostilePathAndIgnoreDirtyWorktree() async throws {
+        let fixture = try GitFixture.hostilePath()
+        defer { fixture.remove() }
+        let runner = CountingSystemRunner()
+        let engine = ExactGitEngine(runner: runner)
+        let revision = try await engine.resolveRevision(repositoryPath: fixture.repository.path, base: fixture.base, head: fixture.head)
+        await runner.reset()
+
+        let manifest = try await engine.materialize(revision)
+        XCTAssertEqual(manifest.files.map(\.path), [fixture.hostilePath])
+        XCTAssertTrue(manifest.files[0].hunks.flatMap(\.lines).contains { $0.text == "committed object" })
+        XCTAssertFalse(manifest.files[0].hunks.flatMap(\.lines).contains { $0.text == "dirty working tree" })
+        let counts = await runner.counts()
+        XCTAssertEqual(counts.batch, 2)
+        XCTAssertLessThanOrEqual(counts.total, 9)
+    }
+
+    func testRepresentativeFixtureHasStableProcessCeiling() async throws {
+        let fixture = try GitFixture.representative()
+        defer { fixture.remove() }
+        let runner = CountingSystemRunner()
+        let engine = ExactGitEngine(runner: runner)
+        let revision = try await engine.resolveRevision(repositoryPath: fixture.repository.path, base: fixture.base, head: fixture.head)
+        await runner.reset()
+
+        let manifest = try await engine.materialize(revision)
+        XCTAssertEqual(manifest.files.count, 101)
+        let counts = await runner.counts()
+        XCTAssertEqual(counts.batch, 2)
+        XCTAssertLessThanOrEqual(counts.total, 110, "process amplification is the stable cross-host performance regression gate")
     }
 }
 
@@ -253,5 +308,103 @@ private actor RecordingRunner: GitProcessRunning {
     func run(repository: String, arguments: [String], environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
         self.arguments = arguments
         throw GitEngineError.invalidRef
+    }
+}
+
+private actor CountingSystemRunner: GitBatchProcessRunning {
+    private let runner = SystemGitProcessRunner()
+    private var processCount = 0
+    private var batchCount = 0
+
+    func run(repository: String, arguments: [String], environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
+        let result = try await runner.run(repository: repository, arguments: arguments, environment: environment, outputLimit: outputLimit, timeout: timeout)
+        processCount += 1
+        return result
+    }
+
+    func runBatch(repository: String, arguments: [String], standardInput: Data, environment: [String: String], outputLimit: Int, timeout: Duration) async throws -> GitProcessResult {
+        let result = try await runner.runBatch(repository: repository, arguments: arguments, standardInput: standardInput, environment: environment, outputLimit: outputLimit, timeout: timeout)
+        processCount += 1; batchCount += 1
+        return result
+    }
+
+    func reset() { processCount = 0; batchCount = 0 }
+    func counts() -> (total: Int, batch: Int) { (processCount, batchCount) }
+}
+
+private final class GitFixture {
+    let repository: URL
+    let base: String
+    let head: String
+    let hostilePath: String
+
+    private init(repository: URL, base: String, head: String, hostilePath: String = "") {
+        self.repository = repository; self.base = base; self.head = head; self.hostilePath = hostilePath
+    }
+
+    static func hostilePath() throws -> GitFixture {
+        let repository = try makeRepository()
+        let path = "tab\tline\n<script>.txt"
+        do {
+            try write("base object\n", repository.appendingPathComponent(path))
+            try git(repository, ["add", "--all"]); try commit(repository, "base")
+            let base = try git(repository, ["rev-parse", "HEAD"])
+            try write("committed object\n", repository.appendingPathComponent(path))
+            try git(repository, ["add", "--all"]); try commit(repository, "head")
+            let head = try git(repository, ["rev-parse", "HEAD"])
+            try write("dirty working tree\n", repository.appendingPathComponent(path))
+            return GitFixture(repository: repository, base: base, head: head, hostilePath: path)
+        } catch {
+            try? FileManager.default.removeItem(at: repository); throw error
+        }
+    }
+
+    static func representative() throws -> GitFixture {
+        let repository = try makeRepository()
+        do {
+            try writeRepresentative(repository, increment: 0)
+            try git(repository, ["add", "--all"]); try commit(repository, "base")
+            let base = try git(repository, ["rev-parse", "HEAD"])
+            try writeRepresentative(repository, increment: 1)
+            try git(repository, ["add", "--all"]); try commit(repository, "head")
+            return GitFixture(repository: repository, base: base, head: try git(repository, ["rev-parse", "HEAD"]))
+        } catch {
+            try? FileManager.default.removeItem(at: repository); throw error
+        }
+    }
+
+    func remove() { try? FileManager.default.removeItem(at: repository) }
+
+    private static func makeRepository() throws -> URL {
+        let repository = FileManager.default.temporaryDirectory.appendingPathComponent("RTCGitTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: false)
+        try git(repository, ["init", "-q", "--initial-branch=main"])
+        return repository
+    }
+
+    private static func writeRepresentative(_ repository: URL, increment: Int) throws {
+        for index in 0..<100 {
+            try write("let value = \(index + increment)\n", repository.appendingPathComponent("file-\(index).swift"))
+        }
+        let lines = (0..<5_000).map { "let line\($0) = \($0 + increment)" }.joined(separator: "\n") + "\n"
+        try write(lines, repository.appendingPathComponent("large.swift"))
+    }
+
+    private static func write(_ value: String, _ url: URL) throws { try Data(value.utf8).write(to: url) }
+    private static func commit(_ repository: URL, _ message: String) throws {
+        try git(repository, ["-c", "user.name=RTCGit Tests", "-c", "user.email=fixture@example.invalid", "commit", "-qm", message])
+    }
+
+    @discardableResult
+    private static func git(_ repository: URL, _ arguments: [String]) throws -> String {
+        let process = Process(), output = Pipe(), error = Pipe()
+        process.executableURL = URL(fileURLWithPath: SystemGitProcessRunner.executable)
+        process.arguments = ["-C", repository.path] + arguments
+        process.standardOutput = output; process.standardError = error
+        try process.run(); process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "RTCGitTests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)])
+        }
+        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
